@@ -35,6 +35,8 @@ target_include_directories(unit_tests PRIVATE
 target_link_libraries(unit_tests PRIVATE
     rexcodegen
     rexruntime
+    # include/rex/hash.h includes xxhash.h; rexcodegen and rexruntime link xxHash privately
+    xxHash::xxhash
     Catch2::Catch2WithMain
 )
 
