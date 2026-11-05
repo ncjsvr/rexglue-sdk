@@ -24,6 +24,8 @@ struct ProjectRecompilerOptions {
   std::vector<std::string> targets;  // empty = all
   bool force = false;
   bool enableExceptionHandlers = false;
+  /// Overrides every binary's `backend` config key when non-empty ("cpp" or "wasm").
+  std::string backend{};
   ProgressReporter* reporter = nullptr;
 
   /// Bypass the stamp gate and regenerate every targeted module.

@@ -98,6 +98,10 @@ struct RecompilerConfig {
   bool nonVolatileRegistersAsLocalVariables = false;
   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
 
+  // === Backend selection ===
+  std::string backend = "cpp";  ///< "cpp" (C++ sources) or "wasm" (chunk modules + manifest.json)
+  uint32_t wasmChunkRange = 0;  ///< wasm: guest bytes per chunk module, 0 = one chunk
+
   // === Analysis tuning (optional) ===
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
   uint32_t dataRegionThreshold = 16;  ///< Consecutive invalid instructions to mark as data region

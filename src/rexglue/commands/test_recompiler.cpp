@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -37,6 +38,7 @@
 #include <rex/system/map_parser.h>
 
 #include "codegen/template_registry_internal.h"
+#include "codegen/wasm/wasm_writer.h"
 
 namespace rexglue::cli {
 
@@ -299,6 +301,44 @@ std::string CategoryFromStem(std::string_view stem) {
   return "misc";
 }
 
+/* Test label -> generated function name ("{stem}_{ADDR}") for every translated function. */
+std::unordered_map<std::string, std::string> MapTestSymbols(
+    const std::map<std::string, std::unordered_set<size_t>>& functionsByFile,
+    std::string_view binDir, std::string_view asmDir) {
+  std::unordered_map<std::string, std::string> allSymbols;
+  for (const auto& [stem, addresses] : functionsByFile) {
+    auto mapPath = fmt::format("{}/{}.map", binDir, stem);
+    auto mapSymbols = ParseMapFile(mapPath);
+    for (const auto& [addr, name] : mapSymbols) {
+      if (addresses.count(addr))
+        allSymbols.emplace(name, fmt::format("{}_{:X}", stem, addr));
+    }
+    if (!mapSymbols.empty())
+      continue;
+
+    std::vector<size_t> sortedAddresses(addresses.begin(), addresses.end());
+    std::sort(sortedAddresses.begin(), sortedAddresses.end());
+    std::ifstream in(fmt::format("{}/{}.s", asmDir, stem));
+    if (!in.is_open())
+      continue;
+    std::string line;
+    size_t functionIndex = 0;
+    while (std::getline(in, line)) {
+      if (line.empty() || line[0] == '#' || line[0] == '/' || line[0] == '*')
+        continue;
+      auto colonIdx = line.find(':');
+      if (colonIdx == std::string::npos || line[0] == ' ' || line[0] == '\t' || line[0] == '.')
+        continue;
+      auto name = line.substr(0, colonIdx);
+      if (functionIndex < sortedAddresses.size()) {
+        allSymbols.emplace(name, fmt::format("{}_{:X}", stem, sortedAddresses[functionIndex]));
+        ++functionIndex;
+      }
+    }
+  }
+  return allSymbols;
+}
+
 bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
   std::array<ui::KeyValueRow, 3> header_rows = {{
       {"Bin dir", std::string(binDir)},
@@ -375,37 +415,7 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
     functionsOut << recompiledCode << '\n';
   }
 
-  std::unordered_map<std::string, std::string> allSymbols;
-  for (const auto& [stem, addresses] : functionsByFile) {
-    auto mapPath = fmt::format("{}/{}.map", binDir, stem);
-    auto mapSymbols = ParseMapFile(mapPath);
-    for (const auto& [addr, name] : mapSymbols) {
-      if (addresses.count(addr))
-        allSymbols.emplace(name, fmt::format("{}_{:X}", stem, addr));
-    }
-    if (!mapSymbols.empty())
-      continue;
-
-    std::vector<size_t> sortedAddresses(addresses.begin(), addresses.end());
-    std::sort(sortedAddresses.begin(), sortedAddresses.end());
-    std::ifstream in(fmt::format("{}/{}.s", asmDir, stem));
-    if (!in.is_open())
-      continue;
-    std::string line;
-    size_t functionIndex = 0;
-    while (std::getline(in, line)) {
-      if (line.empty() || line[0] == '#' || line[0] == '/' || line[0] == '*')
-        continue;
-      auto colonIdx = line.find(':');
-      if (colonIdx == std::string::npos || line[0] == ' ' || line[0] == '\t' || line[0] == '.')
-        continue;
-      auto name = line.substr(0, colonIdx);
-      if (functionIndex < sortedAddresses.size()) {
-        allSymbols.emplace(name, fmt::format("{}_{:X}", stem, sortedAddresses[functionIndex]));
-        ++functionIndex;
-      }
-    }
-  }
+  auto allSymbols = MapTestSymbols(functionsByFile, binDir, asmDir);
 
   nlohmann::json templateData;
   templateData["functions"] = nlohmann::json::array();
@@ -452,10 +462,154 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
   return true;
 }
 
+/* Reads a whole file; empty on failure. */
+std::vector<uint8_t> ReadBinaryFile(const fs::path& path) {
+  std::vector<uint8_t> data;
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file)
+    return data;
+  auto size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  data.resize(static_cast<size_t>(size));
+  file.read(reinterpret_cast<char*>(data.data()), size);
+  return data;
+}
+
+/*
+ * Wasm variant: one module per fixture binary (each a chunk of one manifest, sharing the
+ * table slot space), every function exported by name, plus tests.json with the fixtures'
+ * REGISTER/MEMORY annotations for translator/tests/run-fixtures.mjs.
+ */
+bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
+  namespace wasm = codegen::wasm;
+  std::array<ui::KeyValueRow, 4> header_rows = {{
+      {"Backend", "wasm"},
+      {"Bin dir", std::string(binDir)},
+      {"ASM dir", std::string(asmDir)},
+      {"Output dir", std::string(outDir)},
+  }};
+  ui::KeyValueBlock("Translating PPC tests:", header_rows);
+  fs::create_directories(outDir);
+
+  std::vector<fs::path> bins;
+  for (const auto& entry : fs::directory_iterator(binDir)) {
+    if (entry.path().extension() == ".bin")
+      bins.push_back(entry.path());
+  }
+  std::sort(bins.begin(), bins.end());
+
+  struct FileInfo {
+    std::string module;
+    std::string image;
+    std::set<std::string> unimplemented;
+  };
+  std::map<std::string, std::unordered_set<size_t>> functionsByFile;
+  std::map<std::string, FileInfo> files;
+  wasm::ImportRegistry imports;
+  nlohmann::json chunks = nlohmann::json::array();
+  uint32_t nextSlot = 0;
+
+  for (const auto& binPath : bins) {
+    auto stem = binPath.stem().string();
+    auto fileData = ReadBinaryFile(binPath);
+    if (fileData.empty())
+      continue;
+    auto symbols = ParseMapFile(fmt::format("{}/{}.map", binDir, stem));
+    if (symbols.empty()) {
+      REXLOG_ERROR("No symbols found in map file for {}", stem);
+      continue;
+    }
+
+    codegen::TestModule module;
+    module.Load(kTestBaseAddress, fileData.data(), fileData.size());
+    module.set_name(stem);
+    codegen::RecompilerConfig config;
+    config.outDirectoryPath = std::string(outDir);
+    config.backend = "wasm";
+    auto ctx =
+        codegen::CodegenContext::Create(codegen::BinaryView::fromModule(module), std::move(config));
+    codegen::AnalyzeTestBinary(ctx, stem, symbols, kTestBaseAddress, fileData.data(),
+                               fileData.size());
+
+    std::vector<const codegen::FunctionNode*> functions;
+    for (const auto& [addr, node] : ctx.graph.functions()) {
+      if (node->authority() != codegen::FunctionAuthority::IMPORT)
+        functions.push_back(node.get());
+    }
+    std::sort(functions.begin(), functions.end(),
+              [](const auto* a, const auto* b) { return a->base() < b->base(); });
+    if (functions.empty())
+      continue;
+
+    codegen::EmitContext emitCtx{ctx.binary(), ctx.Config(), ctx.graph, 0, nullptr};
+    wasm::TranslateOptions options;
+    options.exportFunctions = true;
+    options.singleFile = stem + ".wasm";
+    auto translation = wasm::TranslateFunctions(emitCtx, functions, nextSlot, imports, options);
+    nextSlot = translation.endSlot;
+
+    FileInfo info;
+    info.image = fs::absolute(binPath).generic_string();
+    for (auto& chunk : translation.chunks) {
+      std::ofstream out(fmt::format("{}/{}", outDir, chunk.file), std::ios::binary);
+      out.write(reinterpret_cast<const char*>(chunk.bytes.data()),
+                static_cast<std::streamsize>(chunk.bytes.size()));
+      info.module = chunk.file;
+      info.unimplemented.insert(chunk.unimplemented.begin(), chunk.unimplemented.end());
+      chunks.push_back({{"file", chunk.file}, {"functions", chunk.functions}});
+    }
+    for (const auto* fn : functions)
+      functionsByFile[stem].emplace(fn->base());
+    files.emplace(stem, std::move(info));
+  }
+
+  nlohmann::json manifest = wasm::ManifestBase(nextSlot);
+  manifest["chunks"] = chunks;
+  manifest["imports"] = imports.toJson();
+  {
+    std::ofstream out(fmt::format("{}/manifest.json", outDir));
+    out << manifest.dump(2) << '\n';
+  }
+
+  auto allSymbols = MapTestSymbols(functionsByFile, binDir, asmDir);
+  nlohmann::json testFiles = nlohmann::json::array();
+  size_t totalTests = 0;
+  for (const auto& [stem, info] : files) {
+    nlohmann::json file;
+    file["stem"] = stem;
+    file["module"] = info.module;
+    file["image"] = info.image;
+    file["image_base"] = kTestBaseAddress;
+    file["unimplemented"] =
+        std::vector<std::string>(info.unimplemented.begin(), info.unimplemented.end());
+    file["tests"] = nlohmann::json::array();
+    for (const auto& spec : ParseTestSpecs(fmt::format("{}/{}.s", asmDir, stem), allSymbols)) {
+      nlohmann::json test;
+      test["name"] = BuildHierarchicalName(stem, spec.name);
+      test["symbol"] = spec.symbol;
+      test["inputs"]["registers"] = SerializeRegisters(spec.inputs);
+      test["inputs"]["memory"] = SerializeMemory(spec.mem_inputs);
+      test["outputs"]["registers"] = SerializeRegisters(spec.outputs);
+      test["outputs"]["memory"] = SerializeMemory(spec.mem_outputs);
+      file["tests"].push_back(std::move(test));
+      ++totalTests;
+    }
+    testFiles.push_back(std::move(file));
+  }
+  {
+    std::ofstream out(fmt::format("{}/tests.json", outDir));
+    out << nlohmann::json{{"files", testFiles}}.dump(2) << '\n';
+  }
+  REXLOG_INFO("wasm: {} modules, {} functions, {} test cases", files.size(), nextSlot,
+              totalTests);
+  return true;
+}
+
 struct RecompileTestsArgs {
   std::string bin_dir;
   std::string asm_dir;
   std::string output;
+  std::string backend = "cpp";
 };
 
 }  // namespace
@@ -474,9 +628,16 @@ void RegisterRecompileTests(CLI::App& parent, const CliContext& ctx, DeferredAct
   sub->add_option("--output", args->output, "Output path for recompile-tests")
       ->type_name("PATH")
       ->required();
+  sub->add_option("--backend", args->backend,
+                  "cpp: Catch2 sources (default); wasm: one module per fixture plus "
+                  "manifest.json and tests.json")
+      ->check(CLI::IsMember({"cpp", "wasm"}));
   sub->callback([args, &pending]() {
     pending = [args]() -> rex::Result<void> {
-      if (!RecompileTests(args->bin_dir, args->asm_dir, args->output)) {
+      const bool ok = args->backend == "wasm"
+                          ? RecompileTestsWasm(args->bin_dir, args->asm_dir, args->output)
+                          : RecompileTests(args->bin_dir, args->asm_dir, args->output);
+      if (!ok) {
         return Err<void>(rex::ErrorCategory::Validation, "Test recompilation failed");
       }
       return rex::Ok();

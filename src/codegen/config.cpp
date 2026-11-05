@@ -97,6 +97,12 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
   if (auto v = toml["template_dir"].value<std::string>()) {
     MergeScalar(cfg.templateDir, *v, "template_dir");
   }
+  if (auto v = toml["backend"].value<std::string>()) {
+    MergeScalar(cfg.backend, *v, "backend");
+  }
+  if (auto v = toml["wasm_chunk_range"].value<int64_t>()) {
+    cfg.wasmChunkRange = static_cast<uint32_t>(*v);
+  }
 
   // Bool scalars
   auto hasBool = [&](const char* key) -> bool { return toml[key].is_boolean(); };

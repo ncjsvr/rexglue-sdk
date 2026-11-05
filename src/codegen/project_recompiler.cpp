@@ -41,6 +41,7 @@
 #include "codegen_logging.h"
 #include "file_io.h"
 #include "template_registry_internal.h"
+#include "wasm/wasm_writer.h"
 
 namespace rex::codegen {
 
@@ -313,6 +314,8 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     RecompilerConfig cfg = std::move(targeted[0].config);
     if (opts.enableExceptionHandlers)
       cfg.generateExceptionHandlers = true;
+    if (!opts.backend.empty())
+      cfg.backend = opts.backend;
 
     auto ctx = CodegenContext::Create(std::move(bv), std::move(cfg));
     ctx.setResolver(resolver);
@@ -336,6 +339,8 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     RecompilerConfig cfg = std::move(targeted[i + 1].config);
     if (opts.enableExceptionHandlers)
       cfg.generateExceptionHandlers = true;
+    if (!opts.backend.empty())
+      cfg.backend = opts.backend;
 
     auto ctx = CodegenContext::Create(std::move(bv), std::move(cfg));
     ctx.setResolver(resolver);
@@ -420,24 +425,40 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
       opts.reporter->phaseChanged("Write");
     }
     REXCODEGEN_TRACE("Writing output for '{}'...", entry.module->targetName);
-    CodegenWriter writer(entry.ctx, runtime.get());
-    if (!writer.write(opts.force)) {
+    const std::string& backend = entry.ctx.Config().backend;
+    if (backend != "cpp" && backend != "wasm") {
+      return Err<void>(ErrorCategory::Config,
+                       fmt::format("Unknown backend '{}' for '{}' (expected cpp or wasm)", backend,
+                                   entry.module->targetName));
+    }
+    OutputStamp stamp;
+    stamp.fingerprint = fingerprints[i];
+    auto collect = [&](const auto& writer) {
+      deletedFiles_.insert(deletedFiles_.end(), writer.deletedFiles().begin(),
+                           writer.deletedFiles().end());
+      writtenFiles_.insert(writtenFiles_.end(), writer.writtenFiles().begin(),
+                           writer.writtenFiles().end());
+      unchangedFiles_.insert(unchangedFiles_.end(), writer.unchangedFiles().begin(),
+                             writer.unchangedFiles().end());
+      stamp.outputs.insert(stamp.outputs.end(), writer.writtenFiles().begin(),
+                           writer.writtenFiles().end());
+      stamp.outputs.insert(stamp.outputs.end(), writer.unchangedFiles().begin(),
+                           writer.unchangedFiles().end());
+    };
+    bool written = false;
+    if (backend == "wasm") {
+      wasm::WasmWriter writer(entry.ctx, runtime.get());
+      written = writer.write(opts.force);
+      collect(writer);
+    } else {
+      CodegenWriter writer(entry.ctx, runtime.get());
+      written = writer.write(opts.force);
+      collect(writer);
+    }
+    if (!written) {
       return Err<void>(ErrorCategory::Validation,
                        fmt::format("Write failed for '{}'", entry.module->targetName));
     }
-    deletedFiles_.insert(deletedFiles_.end(), writer.deletedFiles().begin(),
-                         writer.deletedFiles().end());
-    writtenFiles_.insert(writtenFiles_.end(), writer.writtenFiles().begin(),
-                         writer.writtenFiles().end());
-    unchangedFiles_.insert(unchangedFiles_.end(), writer.unchangedFiles().begin(),
-                           writer.unchangedFiles().end());
-
-    OutputStamp stamp;
-    stamp.fingerprint = fingerprints[i];
-    stamp.outputs.insert(stamp.outputs.end(), writer.writtenFiles().begin(),
-                         writer.writtenFiles().end());
-    stamp.outputs.insert(stamp.outputs.end(), writer.unchangedFiles().begin(),
-                         writer.unchangedFiles().end());
     std::sort(stamp.outputs.begin(), stamp.outputs.end());
 
     auto outDir = entry.ctx.configDir() / entry.ctx.Config().outDirectoryPath;

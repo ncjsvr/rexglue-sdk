@@ -50,6 +50,15 @@ set(CODEGEN_BUILDER_SOURCES
     builders/vector.cpp
 )
 
+# Wasm backend (guest ABI v1): encoder, builders, function lowering, chunk/manifest writer
+set(CODEGEN_WASM_SOURCES
+    wasm/wasm_encoder.cpp
+    wasm/wasm_context_layout.cpp
+    wasm/wasm_builders.cpp
+    wasm/wasm_function.cpp
+    wasm/wasm_writer.cpp
+)
+
 # Inja templates
 set(TEMPLATE_SOURCE_DIR "${REXGLUE_ROOT}/resources/templates")
 set(TEMPLATE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/templates")
@@ -84,6 +93,7 @@ add_library(rexcodegen STATIC
     ${CODEGEN_CORE_SOURCES}
     ${CODEGEN_PPC_SOURCES}
     ${CODEGEN_BUILDER_SOURCES}
+    ${CODEGEN_WASM_SOURCES}
 )
 add_library(rex::codegen ALIAS rexcodegen)
 add_dependencies(rexcodegen embed_templates)

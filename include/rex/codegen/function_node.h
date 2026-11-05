@@ -15,6 +15,11 @@
 
 namespace rex::codegen {
 
+namespace wasm {
+struct ModuleEnv;
+struct FunctionOutput;
+}  // namespace wasm
+
 //=============================================================================
 // Function Node
 //=============================================================================
@@ -97,6 +102,11 @@ class FunctionNode {
   /// For imports: emits REX_IMPORT macro
   /// For normal functions: emits REX_FUNC with blocks and instructions
   std::string emitCpp(const EmitContext& ctx) const;
+
+  /// Emit the wasm body of this function (wasm backend, guest ABI v1).
+  /// Defined in src/codegen/wasm/wasm_function.cpp. Returns false for imports.
+  bool emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
+                wasm::FunctionOutput& out) const;
 
   //=========================================================================
   // Instruction access (valid after discover)

@@ -65,7 +65,8 @@ void ReportStaleIncludes(const fs::path& manifest_path,
 }
 
 Result<void> RecompileProject(const fs::path& manifest_path, const CliContext& ctx,
-                              const std::vector<std::string>& targets, bool ignore_stamp) {
+                              const std::vector<std::string>& targets, bool ignore_stamp,
+                              const std::string& backend) {
   auto manifest = rex::codegen::ManifestConfig::Load(manifest_path);
   if (!manifest) {
     return Err<void>(rex::ErrorCategory::Config, "Failed to load manifest");
@@ -80,6 +81,7 @@ Result<void> RecompileProject(const fs::path& manifest_path, const CliContext& c
       .ignoreStamp = ignore_stamp,
       .sdkVersion = REXGLUE_VERSION_FLOOR "-" REXGLUE_VERSION_CHANNEL,
   };
+  opts.backend = backend;
   auto result = recompiler.Run(opts);
   if (!result)
     return result;
@@ -134,6 +136,7 @@ struct CodegenArgs {
   std::string config_path;
   std::vector<std::string> targets;
   bool ignore_stamp = false;
+  std::string backend;
 };
 
 }  // namespace
@@ -182,7 +185,8 @@ Result<std::string> DiscoverManifestInCwd() {
 }
 
 Result<void> CodegenFromConfig(const std::string& config_path, const CliContext& ctx,
-                               const std::vector<std::string>& targets, bool ignore_stamp) {
+                               const std::vector<std::string>& targets, bool ignore_stamp,
+                               const std::string& backend) {
   REXLOG_TRACE("Generating code with config: {}", config_path);
 
   fs::path manifest_path = config_path;
@@ -207,7 +211,8 @@ Result<void> CodegenFromConfig(const std::string& config_path, const CliContext&
     REXLOG_INFO("Regenerated generated/rexglue.cmake for SDK v{}", current_version);
   }
 
-  if (auto run_result = RecompileProject(manifest_path, ctx, targets, ignore_stamp); !run_result) {
+  if (auto run_result = RecompileProject(manifest_path, ctx, targets, ignore_stamp, backend);
+      !run_result) {
     return run_result;
   }
 
@@ -229,6 +234,10 @@ void RegisterCodegen(CLI::App& parent, const CliContext& ctx, DeferredAction& pe
       ->take_all();
   sub->add_flag("--ignore-stamp", args->ignore_stamp,
                 "Regenerate even when inputs match the recorded stamp");
+  sub->add_option("--backend", args->backend,
+                  "Output backend: cpp (C++ sources) or wasm (chunk modules + manifest.json); "
+                  "overrides the config's backend key")
+      ->check(CLI::IsMember({"cpp", "wasm"}));
 
   sub->callback([args, &ctx, &pending]() {
     pending = [args, &ctx]() -> Result<void> {
@@ -239,7 +248,7 @@ void RegisterCodegen(CLI::App& parent, const CliContext& ctx, DeferredAction& pe
           return Err<void>(discovered.error());
         path = *discovered;
       }
-      return CodegenFromConfig(path, ctx, args->targets, args->ignore_stamp);
+      return CodegenFromConfig(path, ctx, args->targets, args->ignore_stamp, args->backend);
     };
   });
 }

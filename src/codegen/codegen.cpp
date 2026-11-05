@@ -18,6 +18,8 @@
 #include <rex/logging.h>
 #include <rex/runtime.h>
 
+#include "wasm/wasm_writer.h"
+
 namespace rex::codegen {
 
 CodegenPipeline::~CodegenPipeline() = default;
@@ -83,6 +85,12 @@ Result<void> CodegenPipeline::RunAnalyze() {
 }
 
 Result<void> CodegenPipeline::RunWrite(bool force) {
+  if (ctx_->Config().backend == "wasm") {
+    wasm::WasmWriter writer(*ctx_, runtime_.get());
+    if (!writer.write(force))
+      return Err(ErrorCategory::Validation, "Code generation failed.");
+    return Ok();
+  }
   CodegenWriter writer(*ctx_, runtime_.get());
   if (!writer.write(force))
     return Err(ErrorCategory::Validation, "Code generation failed.");
