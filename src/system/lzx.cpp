@@ -19,6 +19,17 @@
 #include <rex/system/util/xex2_info.h>
 #include <rex/types.h>
 
+#if REXGLUE_TRANSLATOR_LZX
+// MCLA-Reborn (T-049, D-070): builds that must not link LGPL code decompress with
+// translator-lzx, which has lzx_decompress's exact contract.
+#include <translator_lzx/lzx.h>
+
+int lzx_decompress(const void* lzx_data, size_t lzx_len, void* dest, size_t dest_len,
+                   uint32_t window_size, void* window_data, size_t window_data_len) {
+  return translator_lzx_decompress(lzx_data, lzx_len, dest, dest_len, window_size, window_data,
+                                   window_data_len);
+}
+#else
 #include <lzx.h>
 #include <mspack.h>
 
@@ -146,6 +157,7 @@ int lzx_decompress(const void* lzx_data, size_t lzx_len, void* dest, size_t dest
 
   return result_code;
 }
+#endif  // REXGLUE_TRANSLATOR_LZX
 
 int lzxdelta_apply_patch(rex::xex2_delta_patch* patch, size_t patch_len, uint32_t window_size,
                          void* dest) {

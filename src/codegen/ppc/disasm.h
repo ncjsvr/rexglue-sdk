@@ -11,6 +11,30 @@
 
 #pragma once
 
+#if REXGLUE_TRANSLATOR_PPC
+// MCLA-Reborn (T-048, D-070): builds that must not link GPL code decode with translator-ppc,
+// which fills the same ppc_insn as the binutils-derived engine below.
+#include <cstddef>
+#include <cstdint>
+
+#include <translator_ppc/binutils_compat.h>
+
+namespace rex::codegen::ppc {
+
+inline int Disassemble(const void* code, size_t size, uint64_t base, ppc_insn& out) {
+  return translator_ppc::disassemble(code, size, base, out);
+}
+
+inline int Disassemble(const void* code, uint64_t base, ppc_insn& out) {
+  return Disassemble(code, 4, base, out);
+}
+
+int Disassemble(const void* code, uint64_t base, ppc_insn* out, size_t nOut);
+
+}  // namespace rex::codegen::ppc
+
+#else
+
 #include <dis-asm.h>
 #include <ppc.h>
 
@@ -49,3 +73,5 @@ inline int Disassemble(const void* code, uint64_t base, ppc_insn& out) {
 int Disassemble(const void* code, uint64_t base, ppc_insn* out, size_t nOut);
 
 }  // namespace rex::codegen::ppc
+
+#endif  // REXGLUE_TRANSLATOR_PPC

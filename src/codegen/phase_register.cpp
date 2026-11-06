@@ -25,7 +25,11 @@
 #include <rex/system/export_resolver.h>
 #include <rex/types.h>
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <ppc.h>
+#endif
 
 using rex::codegen::ppc::decode_instruction;
 using rex::codegen::ppc::Opcode;

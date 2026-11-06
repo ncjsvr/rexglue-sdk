@@ -35,6 +35,12 @@ constexpr uint64_t kMinMemoryPages = (kGuestBase + 0x100000000ull) / kPageSize;
 /// Upper bound declared on the imported memory (16 GiB, V8's memory64 limit).
 constexpr uint64_t kMaxMemoryPages = 0x400000000ull / kPageSize;
 
+/// Titles whose code may only ever go through the wasm backend (MCLA-Reborn D-006: no C++
+/// recompile of the game may exist). `titleId` is 8 upper-case hex digits.
+inline bool IsWasmOnlyTitle(const std::string& titleId) {
+  return titleId == "545407F8";  // Midnight Club: Los Angeles Complete Edition
+}
+
 /// Codes passed to env.trap. Only kGuestTrap may return to the caller.
 enum TrapCode : int32_t {
   kGuestTrap = 0,
@@ -57,13 +63,20 @@ class ImportRegistry {
     std::string library;
     uint32_t ordinal;
     std::string name;
+    uint32_t thunk = 0;  ///< Guest address of the import's thunk, when known
   };
   uint32_t idFor(const std::string& importName, const EmitContext& ctx);
+  /// Id of the import whose thunk starts at `thunkAddress` (an IMPORT function node), by
+  /// its "library@ordinal" symbol; `fallbackName` when the binary has no such symbol.
+  uint32_t idForThunk(uint32_t thunkAddress, const std::string& fallbackName,
+                      const EmitContext& ctx);
   const std::vector<Entry>& entries() const { return entries_; }
   nlohmann::json toJson() const;
 
  private:
   std::unordered_map<std::string, uint32_t> byName_;
+  std::unordered_map<uint32_t, std::string> symbolByThunk_;
+  bool symbolsLoaded_ = false;
   std::vector<Entry> entries_;
 };
 

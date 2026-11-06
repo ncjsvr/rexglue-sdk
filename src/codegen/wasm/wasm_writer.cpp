@@ -186,8 +186,7 @@ bool WasmWriter::write(bool force) {
 
   EmitContext emitCtx{ctx_.binary(), config, ctx_.graph,
                       static_cast<uint32_t>(ctx_.analysisState().entryPoint), nullptr};
-  if (runtime_)
-    emitCtx.resolver = runtime_->export_resolver();
+  emitCtx.resolver = runtime_ ? runtime_->export_resolver() : ctx_.resolver();
 
   ImportRegistry imports;
   TranslateOptions options;
@@ -195,6 +194,8 @@ bool WasmWriter::write(bool force) {
   auto translation = TranslateFunctions(emitCtx, functions, 0, imports, options);
 
   nlohmann::json manifest = ManifestBase(translation.endSlot);
+  manifest["title_id"] = titleId_;
+  manifest["xex_version"] = xexVersion_;
   manifest["chunks"] = nlohmann::json::array();
   std::set<std::string> produced;
   size_t unimplementedFunctions = 0;

@@ -97,6 +97,7 @@ struct ManifestSummary {
   std::string project_name;
   std::string sdk_version;
   std::string entrypoint_out_dir;
+  std::string entrypoint_backend;
   std::size_t module_count = 0;
 };
 
@@ -109,6 +110,7 @@ rex::Result<ManifestSummary> LoadManifestSummary(const fs::path& manifest_path) 
       .project_name = manifest->projectName,
       .sdk_version = manifest->sdkVersion.value_or(""),
       .entrypoint_out_dir = manifest->entrypoint.recompiler.outDirectoryPath,
+      .entrypoint_backend = manifest->entrypoint.recompiler.backend,
       .module_count = manifest->modules.size(),
   });
 }
@@ -205,6 +207,14 @@ Result<void> CodegenFromConfig(const std::string& config_path, const CliContext&
 
   const std::string current_version = REXGLUE_VERSION_FLOOR;
   EmitProjectHeader(manifest_path, summary);
+
+  // The wasm backend writes chunk modules and manifest.json only: no C++ project glue
+  // (generated/rexglue.cmake) and no sdk_version stamp written back into the manifest.
+  const bool wasm_only =
+      backend == "wasm" || (backend.empty() && summary.entrypoint_backend == "wasm");
+  if (wasm_only) {
+    return RecompileProject(manifest_path, ctx, targets, ignore_stamp, backend);
+  }
 
   if (RefreshGeneratedGlue(manifest_path.parent_path(), summary.project_name, current_version,
                            summary.entrypoint_out_dir)) {

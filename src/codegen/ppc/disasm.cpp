@@ -13,6 +13,7 @@
 
 namespace rex::codegen::ppc {
 
+#if !REXGLUE_TRANSLATOR_PPC
 // Binutils PPC_OPCODE_* dialect bits (see thirdparty/disasm/ppc-dis.c)
 constexpr uintptr_t kXenonDialect = 0x1          // PPC
                                     | 0x4        // 64
@@ -42,6 +43,7 @@ int DisassemblerEngine::Disassemble(const void* code, size_t size, uint64_t base
   info.buffer_length = size;
   return decode_insn_ppc(base, &info, &out);
 }
+#endif  // !REXGLUE_TRANSLATOR_PPC
 
 int Disassemble(const void* code, uint64_t base, ppc_insn* out, size_t nOut) {
   for (size_t i = 0; i < nOut; i++) {

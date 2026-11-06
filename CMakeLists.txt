@@ -18,6 +18,14 @@ project(ReXGlue
 #==========================================================
 # Build Options
 #==========================================================
+# MCLA-Reborn: build only the translator tool (rexglue-translate) with Emscripten; nothing
+# else below is configured. See cmake/rexglue_wasm_translator.cmake.
+option(REXGLUE_WASM_TRANSLATOR "Build only rexglue-translate for Emscripten (wasm backend)" OFF)
+if(REXGLUE_WASM_TRANSLATOR)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_wasm_translator.cmake)
+    return()
+endif()
+
 option(REXGLUE_BUILD_TESTS       "Build PPC instruction and unit tests" OFF)
 option(REXGLUE_ENABLE_SANITIZERS "Enable UndefinedBehaviorSanitizer" OFF)
 option(REXGLUE_ENABLE_FIDELITYFX "Enable optional AMD FidelityFX integration (experimental)" OFF)

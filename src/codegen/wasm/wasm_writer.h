@@ -70,6 +70,11 @@ nlohmann::json ManifestBase(uint32_t slots);
 class WasmWriter {
  public:
   WasmWriter(CodegenContext& ctx, Runtime* runtime = nullptr);
+  /// Title ID (8 hex digits) and XEX version ("a.b.c.d") recorded in manifest.json.
+  void setTitle(std::string titleId, std::string xexVersion) {
+    titleId_ = std::move(titleId);
+    xexVersion_ = std::move(xexVersion);
+  }
   bool write(bool force);
 
   const std::vector<std::string>& deletedFiles() const { return deletedFiles_; }
@@ -79,6 +84,8 @@ class WasmWriter {
  private:
   CodegenContext& ctx_;
   Runtime* runtime_;
+  std::string titleId_;
+  std::string xexVersion_;
   std::vector<std::string> deletedFiles_;
   std::vector<std::string> writtenFiles_;
   std::vector<std::string> unchangedFiles_;

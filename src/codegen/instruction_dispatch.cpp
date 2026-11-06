@@ -17,9 +17,13 @@
 
 #include "codegen_logging.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <dis-asm.h>
 #include <ppc-inst.h>
 #include <ppc.h>
+#endif
 
 namespace rex::codegen {
 

@@ -31,13 +31,17 @@
 #include <rex/codegen/codegen_context.h>
 #include <rex/codegen/function_graph.h>
 #include <rex/codegen/function_scanner.h>
+#if !REXGLUE_NO_CPP_BACKEND
 #include <rex/codegen/template_registry.h>
+#endif
 #include <rex/codegen/test_support.h>
 #include <rex/logging.h>
 #include <rex/string.h>
 #include <rex/system/map_parser.h>
 
+#if !REXGLUE_NO_CPP_BACKEND
 #include "codegen/template_registry_internal.h"
+#endif
 #include "codegen/wasm/wasm_writer.h"
 
 namespace rexglue::cli {
@@ -339,6 +343,7 @@ std::unordered_map<std::string, std::string> MapTestSymbols(
   return allSymbols;
 }
 
+#if !REXGLUE_NO_CPP_BACKEND  // MCLA-Reborn: rexglue-translate has no C++ backend (D-006)
 bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
   std::array<ui::KeyValueRow, 3> header_rows = {{
       {"Bin dir", std::string(binDir)},
@@ -461,6 +466,7 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
   REXLOG_TRACE("Generated {} test cases", totalTests);
   return true;
 }
+#endif  // !REXGLUE_NO_CPP_BACKEND
 
 /* Reads a whole file; empty on failure. */
 std::vector<uint8_t> ReadBinaryFile(const fs::path& path) {
@@ -622,6 +628,11 @@ struct RecompileTestsArgs {
 
 }  // namespace
 
+bool TranslateTestsWasm(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
+  return RecompileTestsWasm(binDir, asmDir, outDir);
+}
+
+#if !REXGLUE_NO_CPP_BACKEND
 void RegisterRecompileTests(CLI::App& parent, const CliContext& ctx, DeferredAction& pending) {
   (void)ctx;
   auto args = std::make_shared<RecompileTestsArgs>();
@@ -652,5 +663,7 @@ void RegisterRecompileTests(CLI::App& parent, const CliContext& ctx, DeferredAct
     };
   });
 }
+
+#endif  // !REXGLUE_NO_CPP_BACKEND
 
 }  // namespace rexglue::cli

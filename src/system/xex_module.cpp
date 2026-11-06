@@ -1065,7 +1065,10 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
   auto base_name = rex::string::utf8_find_base_name_from_guest_path(name);
 
   // Get export resolver for variable import patching
-  auto* export_resolver = kernel_state_->emulator()->export_resolver();
+  // MCLA-Reborn: the dispatcher holds the runtime's export resolver; going through it lets
+  // the translator tool (rexglue-translate) load an XEX without a KernelState.
+  auto* export_resolver = function_dispatcher_ ? function_dispatcher_->export_resolver()
+                                               : kernel_state_->emulator()->export_resolver();
 
   ImportLibrary library_info;
   library_info.name = base_name;

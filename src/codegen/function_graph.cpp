@@ -10,8 +10,10 @@
 
 #include "ppc/instruction.h"
 #include "ppc/disasm.h"
+#if !REXGLUE_NO_CPP_BACKEND
 #include "builders/builder_context.h"
 #include "builders.h"
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -28,8 +30,12 @@
 
 #include "codegen_logging.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <dis-asm.h>
 #include <ppc.h>
+#endif
 
 using rex::codegen::ppc::Disassemble;
 using rex::memory::load_and_swap;
@@ -326,6 +332,9 @@ void FunctionNode::seal() {
       base_, name_, blocks_.size(), labels_.size(), calls_.size(), tailCalls_.size());
 }
 
+#if !REXGLUE_NO_CPP_BACKEND
+// MCLA-Reborn: the translator tool (rexglue-translate) builds without the C++ backend, so
+// it can never write C++ from game code (D-006).
 //=============================================================================
 // FunctionNode - C++ Code Emission
 //=============================================================================
@@ -692,6 +701,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
 
   return out;
 }
+#endif  // !REXGLUE_NO_CPP_BACKEND
 
 void FunctionGraph::addCodeBuffer(uint32_t baseAddress, const uint8_t* data, size_t size) {
   assert_always("FunctionGraph::addCodeBuffer not implemented. Use Recompiler with builders");

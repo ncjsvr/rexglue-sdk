@@ -25,8 +25,12 @@
 #include "../codegen_logging.h"
 #include "wasm_builders_internal.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <dis-asm.h>
 #include <ppc-inst.h>
+#endif
 
 namespace rex::codegen::wasm::detail {
 
@@ -903,7 +907,8 @@ void build_vpkd3d128(W& w) {
       break;
     case 5:  // FLOAT16_4
       if (mask != 2 || shift > 2)
-        REXCODEGEN_WARN("Unexpected float16_4 pack instruction at {:X}", w.base);
+        REXCODEGEN_WARN("Unexpected float16_4 pack instruction at {:X} (mask {}, shift {})",
+                        w.base, mask, shift);
       for (uint32_t i = 0; i < 4; ++i)
         packHalf(w, a, d, 3 - i, (3 - i) + 2 * shift);
       break;

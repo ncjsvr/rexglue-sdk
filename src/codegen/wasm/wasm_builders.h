@@ -19,7 +19,11 @@
 
 #include "wasm_backend.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // ppc_insn is translator_ppc's (T-048)
+#else
 struct ppc_insn;
+#endif
 
 namespace rex::codegen::wasm {
 

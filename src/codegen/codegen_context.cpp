@@ -16,13 +16,16 @@
 #include <rex/logging.h>
 
 #include "codegen_logging.h"
+#if !REXGLUE_NO_RUNTIME
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xex_module.h>
+#endif
 
 namespace rex::codegen {
 
+#if !REXGLUE_NO_RUNTIME  // MCLA-Reborn: the translator tool loads the XEX without a Runtime
 Result<CodegenContext> CodegenContext::Create(const std::filesystem::path& configPath,
                                               Runtime& runtime) {
   CodegenContext ctx;
@@ -80,6 +83,7 @@ Result<CodegenContext> CodegenContext::Create(const std::filesystem::path& confi
 
   return ctx;
 }
+#endif  // !REXGLUE_NO_RUNTIME
 
 CodegenContext CodegenContext::Create(BinaryView binary, RecompilerConfig config) {
   CodegenContext ctx;

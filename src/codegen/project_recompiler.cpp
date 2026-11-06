@@ -259,8 +259,28 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   }
 
   auto entry_display_name = std::filesystem::path(targeted[0].config.filePath).filename().string();
-  ReportBinaryInfo(opts.reporter, entry_display_name,
-                   *runtime->kernel_state()->GetExecutableModule()->xex_module());
+  const auto& entryXex = *runtime->kernel_state()->GetExecutableModule()->xex_module();
+  ReportBinaryInfo(opts.reporter, entry_display_name, entryXex);
+
+  // MCLA-Reborn ground rule (D-006): a C++ recompile of these titles must never exist.
+  // Only the wasm backend may run on them.
+  std::string titleId, xexVersion;
+  if (auto* exec = entryXex.opt_execution_info()) {
+    titleId = fmt::format("{:08X}", static_cast<uint32_t>(exec->title_id));
+    auto v = exec->version();
+    xexVersion = fmt::format("{}.{}.{}.{}", uint32_t(v.major), uint32_t(v.minor),
+                             uint32_t(v.build), uint32_t(v.qfe));
+  }
+  {
+    const std::string& entryBackend =
+        opts.backend.empty() ? targeted[0].config.backend : opts.backend;
+    if (wasm::IsWasmOnlyTitle(titleId) && entryBackend != "wasm") {
+      return Err<void>(ErrorCategory::Config,
+                       fmt::format("Title {} may only be translated with the wasm backend "
+                                   "(--backend wasm); refusing backend '{}'",
+                                   titleId, entryBackend));
+    }
+  }
 
   std::vector<rex::system::object_ref<rex::system::UserModule>> dllModules;
   for (size_t i = 1; i < targeted.size(); ++i) {
@@ -448,9 +468,16 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     bool written = false;
     if (backend == "wasm") {
       wasm::WasmWriter writer(entry.ctx, runtime.get());
+      if (i == 0)
+        writer.setTitle(titleId, xexVersion);
       written = writer.write(opts.force);
       collect(writer);
     } else {
+      if (wasm::IsWasmOnlyTitle(titleId)) {
+        return Err<void>(ErrorCategory::Config,
+                         fmt::format("Title {} may only be translated with the wasm backend",
+                                     titleId));
+      }
       CodegenWriter writer(entry.ctx, runtime.get());
       written = writer.write(opts.force);
       collect(writer);

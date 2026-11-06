@@ -38,6 +38,11 @@
 #elif defined(__gnu_linux__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
+#elif defined(__EMSCRIPTEN__)
+// MCLA-Reborn: the translator tool (rexglue-translate) built with Emscripten. POSIX-like;
+// only the pieces the tool needs are compiled (cmake/rexglue_wasm_translator.cmake).
+#define REX_PLATFORM_EMSCRIPTEN 1
+#define REX_PLATFORM_LINUX 1
 #else
 #error Unsupported target OS.
 #endif
@@ -58,6 +63,9 @@
 #endif
 #ifndef REX_PLATFORM_LINUX
 #define REX_PLATFORM_LINUX 0
+#endif
+#ifndef REX_PLATFORM_EMSCRIPTEN
+#define REX_PLATFORM_EMSCRIPTEN 0
 #endif
 
 #if defined(__clang__)
@@ -82,6 +90,8 @@
 #error Rex is not supported on 32-bit platforms.
 #elif defined(_M_PPC) || defined(__powerpc__)
 #define REX_ARCH_PPC 1
+#elif defined(__wasm64__)
+#define REX_ARCH_WASM64 1
 #endif
 
 #if REX_PLATFORM_WIN32

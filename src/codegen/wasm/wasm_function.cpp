@@ -32,7 +32,11 @@
 #include "../ppc/disasm.h"
 #include "wasm_builders.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <dis-asm.h>
+#endif
 
 namespace rex::codegen {
 
@@ -71,10 +75,27 @@ uint32_t ImportRegistry::idFor(const std::string& importName, const EmitContext&
   return e.id;
 }
 
+uint32_t ImportRegistry::idForThunk(uint32_t thunkAddress, const std::string& fallbackName,
+                                    const EmitContext& ctx) {
+  if (!symbolsLoaded_) {
+    for (const auto& sym : ctx.binary.importSymbols())
+      symbolByThunk_.emplace(sym.address, sym.name);
+    symbolsLoaded_ = true;
+  }
+  auto it = symbolByThunk_.find(thunkAddress);
+  const uint32_t id = idFor(it != symbolByThunk_.end() ? it->second : fallbackName, ctx);
+  entries_[id].thunk = thunkAddress;
+  return id;
+}
+
 nlohmann::json ImportRegistry::toJson() const {
   nlohmann::json arr = nlohmann::json::array();
   for (const auto& e : entries_) {
-    arr.push_back({{"id", e.id}, {"library", e.library}, {"ordinal", e.ordinal}, {"name", e.name}});
+    nlohmann::json entry = {
+        {"id", e.id}, {"library", e.library}, {"ordinal", e.ordinal}, {"name", e.name}};
+    if (e.thunk != 0)
+      entry["thunk"] = e.thunk;
+    arr.push_back(std::move(entry));
   }
   return arr;
 }

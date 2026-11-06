@@ -157,6 +157,15 @@ bool Memory::Initialize() {
     return false;
   }
   mapping_base_ = views_.all_views[0];
+#elif REX_PLATFORM_EMSCRIPTEN
+  // MCLA-Reborn: the mapping is one plain allocation and the views are laid out inside it
+  // without aliasing (src/core/memory_emscripten.cpp); enough for the translator tool, which
+  // only loads the XEX image.
+  mapping_base_ = reinterpret_cast<uint8_t*>(mapping_);
+  if (MapViews(mapping_base_)) {
+    REXSYS_ERROR("Unable to lay out the guest views.");
+    return false;
+  }
 #else
   // Attempt to create our views. This may fail at the first address
   // we pick, so try a few times.
@@ -222,6 +231,7 @@ bool Memory::Initialize() {
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
 
+#if !REX_PLATFORM_EMSCRIPTEN  // no access faults to handle in the translator tool
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
       virtual_membase_, physical_membase_, physical_membase_ + 0x1FFFFFFF, HostToGuestVirtualThunk,
@@ -232,6 +242,7 @@ bool Memory::Initialize() {
     return false;
   }
   REXSYS_DEBUG("Installed MMIO handler for physical address translation");
+#endif
 
   // ?
   uint32_t unk_phys_alloc;

@@ -27,8 +27,12 @@
 #include "../codegen_logging.h"
 #include "wasm_builders_internal.h"
 
+#if REXGLUE_TRANSLATOR_PPC
+#include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
+#else
 #include <dis-asm.h>
 #include <ppc-inst.h>
+#endif
 
 namespace rex::codegen::wasm {
 
@@ -293,7 +297,21 @@ void WasmBuilderContext::setLr(uint32_t value) {
 
 namespace {
 
+/// A call to an import thunk (an IMPORT function node, which is how the analysis records every
+/// call to a kernel/XAM export): env.kernel(ctx, import_id).
+void callImportNode(WasmBuilderContext& w, const FunctionNode& node) {
+  const uint32_t id =
+      w.env.imports ? w.env.imports->idForThunk(node.base(), node.name(), w.emitCtx) : 0;
+  w.get(kLocalCtx);
+  w.i32(static_cast<int32_t>(id));
+  w.c.call(w.env.fnKernel);
+}
+
 void callFunctionNode(WasmBuilderContext& w, const FunctionNode& node) {
+  if (node.authority() == FunctionAuthority::IMPORT) {
+    callImportNode(w, node);
+    return;
+  }
   if (auto it = w.env.localFunctions.find(node.base()); it != w.env.localFunctions.end()) {
     w.get(kLocalCtx);
     w.c.call(it->second);
@@ -360,7 +378,7 @@ void WasmBuilderContext::callGuest(uint32_t target) {
     node = graph().getFunction(target);
   }
 
-  if (!node || node->authority() == FunctionAuthority::IMPORT) {
+  if (!node) {
     REXCODEGEN_ERROR("wasm: unresolved call from 0x{:08X} to 0x{:08X}", base, target);
     trap(kUnresolvedCall, base);
     return;
@@ -1472,8 +1490,7 @@ void gotoJumpTarget(W& w, uint32_t target) {
   if (isInternal(w, target, kind)) {
     w.branchTo(target);
   } else if (kind == TargetKind::Function || kind == TargetKind::Import) {
-    if (const FunctionNode* node = w.graph().getFunction(target);
-        node && node->authority() != FunctionAuthority::IMPORT) {
+    if (const FunctionNode* node = w.graph().getFunction(target)) {
       callFunctionNode(w, *node);
       w.ret();
     } else {

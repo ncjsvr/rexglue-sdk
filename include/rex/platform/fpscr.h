@@ -82,6 +82,28 @@ struct FPSCRPlatform {
   }
 };
 
+#elif defined(__wasm__)
+
+// MCLA-Reborn: WebAssembly has no floating-point control register. Only the translator tool is
+// built for wasm and it never runs guest code; the control word is kept in software with the
+// x86 layout so FPSCRRegister keeps the same size and meaning.
+struct FPSCRPlatform {
+  static constexpr size_t RoundShift = 13;
+  static constexpr size_t RoundMaskVal = 3 << RoundShift;
+  static constexpr size_t FlushMask = (1 << 15) | (1 << 6);
+  static constexpr u32 ExceptionMask = 0x3F << 7;
+  static constexpr size_t GuestToHost[] = {0 << RoundShift, 3 << RoundShift, 2 << RoundShift,
+                                           1 << RoundShift};
+
+  static inline u32& word() noexcept {
+    static thread_local u32 csr = 0x1F80;
+    return csr;
+  }
+  static inline u32 getcsr() noexcept { return word(); }
+  static inline void setcsr(u32 csr) noexcept { word() = csr; }
+  static inline void InitHostExceptions(u32& csr) noexcept { csr |= ExceptionMask; }
+};
+
 #else
 #error "Missing implementation for FPSCR."
 #endif
