@@ -933,6 +933,14 @@ bool XexModule::LoadContinue() {
     return false;
   }
 
+  // MCLA-Reborn (T-017): with swapped guest storage (ADR-0009), the image the loader copied in
+  // as big-endian bytes becomes host-order words here, after the PE headers have been read and
+  // before anything reads it as guest data (imports below, then the game).
+  if (guest_storage::enabled()) {
+    rex::memory::swap_guest_words_in_place(memory()->TranslateVirtual(base_address_),
+                                           image_size() & ~3u);
+  }
+
   // Parse any "unsafe" headers into safer variants
   xex2_opt_generic_u32* alternate_titleids;
   if (GetOptHeader(xex2_header_keys::XEX_HEADER_ALTERNATE_TITLE_IDS, &alternate_titleids)) {

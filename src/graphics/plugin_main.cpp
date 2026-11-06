@@ -51,3 +51,10 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
   REXLOG_ERROR("rexgpu-xenos: requested backend '{}' is not compiled into this plugin", backend);
   return nullptr;
 }
+
+// MCLA-Reborn (T-017): the plugin is its own module with its own copy of the swapped guest
+// storage range (rex/types.h); the native harness turns it on here, as for the runtime DLL.
+extern "C" REX_GPU_PLUGIN_EXPORT void rex_gpu_enable_swapped_guest_storage(void* guest_base,
+                                                                           size_t size) {
+  rex::guest_storage::EnableLocal(guest_base, size);
+}

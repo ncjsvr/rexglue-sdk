@@ -24,13 +24,17 @@ namespace rex {
 namespace system {
 namespace util {
 
-inline std::string_view TranslateAnsiString(const memory::Memory* memory,
-                                            const X_ANSI_STRING* ansi_string) {
+inline std::string TranslateAnsiString(const memory::Memory* memory,
+                                       const X_ANSI_STRING* ansi_string) {
   if (!ansi_string || !ansi_string->length) {
     return "";
   }
-  return std::string_view(memory->TranslateVirtual<const char*>(ansi_string->pointer),
-                          ansi_string->length);
+  // Read through copy_from_guest so swapped guest storage (MCLA-Reborn harness) works.
+  std::string result(ansi_string->length, '\0');
+  rex::memory::copy_from_guest(result.data(),
+                               memory->TranslateVirtual<const char*>(ansi_string->pointer),
+                               result.size());
+  return result;
 }
 
 inline std::string TranslateAnsiPath(const memory::Memory* memory,
@@ -38,8 +42,8 @@ inline std::string TranslateAnsiPath(const memory::Memory* memory,
   return rex::string::trim_string(std::string(TranslateAnsiString(memory, ansi_string)));
 }
 
-inline std::string_view TranslateAnsiStringAddress(const memory::Memory* memory,
-                                                   uint32_t guest_address) {
+inline std::string TranslateAnsiStringAddress(const memory::Memory* memory,
+                                              uint32_t guest_address) {
   if (!guest_address) {
     return "";
   }
@@ -59,7 +63,7 @@ inline std::u16string TranslateUnicodeString(const memory::Memory* memory,
   std::u16string result;
   result.reserve(length);
   for (uint16_t i = 0; i < length / 2; ++i) {
-    uint16_t c = rex::byte_swap(src[i]);
+    uint16_t c = rex::memory::load_and_swap<uint16_t>(src + i);
     result.push_back(c);
   }
   return result;

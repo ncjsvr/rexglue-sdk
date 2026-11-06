@@ -33,6 +33,13 @@ class ThreadState {
   static ThreadState* Get();
   static uint32_t GetThreadID();
 
+  // MCLA-Reborn (T-017): the native harness keeps every guest thread's PPCContext inside its
+  // wasmtime linear memory (Guest ABI v1). When set, new ThreadStates take their context from
+  // `allocate` (which returns a default-constructed PPCContext) and hand it to `release`.
+  using ContextAllocator = ::PPCContext* (*)();
+  using ContextReleaser = void (*)(::PPCContext*);
+  static void SetContextAllocator(ContextAllocator allocate, ContextReleaser release);
+
  private:
   memory::Memory* memory_;
 
@@ -42,6 +49,7 @@ class ThreadState {
   // NOTE: must be 64b aligned for SSE ops.
   alignas(64)::PPCContext context_storage_{};
   ::PPCContext* context_ = &context_storage_;
+  bool external_context_ = false;
 };
 
 // Thread-safe accessors for current thread's PPC context and kernel state.

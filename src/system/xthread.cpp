@@ -645,7 +645,7 @@ void XThread::Execute() {
 
   // Execute the function
   REXSYS_NOISY_DEBUG("XThread::Execute - Calling function at {:08X}", address);
-  func(*ctx, base);
+  runtime::FunctionDispatcher::CallGuest(func, *ctx, base, address);
 
   exit_code = static_cast<int>(ctx->r3.u32);
 

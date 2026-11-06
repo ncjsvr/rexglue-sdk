@@ -155,14 +155,24 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
                                         memory::PageAccess::kReadWrite) {
           result = X_STATUS_ACCESS_VIOLATION;
         } else {
-          result = file_->ReadSync(
-              std::span<uint8_t>(
-                  buffer_physical_heap
-                      ? memory()->TranslatePhysical(
-                            buffer_physical_heap->GetPhysicalAddress(buffer_guest_address))
-                      : memory()->TranslateVirtual(buffer_guest_address),
-                  buffer_length),
-              size_t(byte_offset), &bytes_read);
+          uint8_t* buffer_host =
+              buffer_physical_heap
+                  ? memory()->TranslatePhysical(
+                        buffer_physical_heap->GetPhysicalAddress(buffer_guest_address))
+                  : memory()->TranslateVirtual(buffer_guest_address);
+          if (guest_storage::contains(buffer_host)) {
+            // MCLA-Reborn (T-017): file bytes enter swapped guest storage through a host
+            // buffer, converted at the boundary (ADR-0009).
+            std::vector<uint8_t> staging(buffer_length);
+            result = file_->ReadSync(std::span<uint8_t>(staging.data(), buffer_length),
+                                     size_t(byte_offset), &bytes_read);
+            if (XSUCCEEDED(result)) {
+              rex::memory::copy_to_guest(buffer_host, staging.data(), bytes_read);
+            }
+          } else {
+            result = file_->ReadSync(std::span<uint8_t>(buffer_host, buffer_length),
+                                     size_t(byte_offset), &bytes_read);
+          }
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
               buffer_physical_heap->TriggerCallbacks(
@@ -263,9 +273,16 @@ X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length, uin
   }
 
   size_t bytes_written = 0;
-  X_STATUS result = file_->WriteSync(
-      std::span<const uint8_t>(memory()->TranslateVirtual(buffer_guest_address), buffer_length),
-      size_t(byte_offset), &bytes_written);
+  const uint8_t* source = memory()->TranslateVirtual(buffer_guest_address);
+  std::vector<uint8_t> staging;
+  if (guest_storage::contains(source)) {
+    // MCLA-Reborn (T-017): out of swapped guest storage through a host buffer.
+    staging.resize(buffer_length);
+    rex::memory::copy_from_guest(staging.data(), source, buffer_length);
+    source = staging.data();
+  }
+  X_STATUS result = file_->WriteSync(std::span<const uint8_t>(source, buffer_length),
+                                     size_t(byte_offset), &bytes_written);
   if (XSUCCEEDED(result)) {
     position_ += bytes_written;
   }

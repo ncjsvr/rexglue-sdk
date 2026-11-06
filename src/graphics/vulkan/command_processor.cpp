@@ -4251,8 +4251,8 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
 
   const uint8_t* readback_bytes = reinterpret_cast<const uint8_t*>(readback_mapping);
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    std::memcpy(memory_->TranslatePhysical(memexport_range.base_address_dwords << 2),
-                readback_bytes, memexport_range.size_bytes);
+    memory_->CopyToPhysical(memexport_range.base_address_dwords << 2, readback_bytes,
+                            memexport_range.size_bytes);
     readback_bytes += memexport_range.size_bytes;
   }
   dfn.vkUnmapMemory(device, readback_memory);
@@ -4372,8 +4372,8 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
   const uint8_t* readback_bytes =
       reinterpret_cast<const uint8_t*>(readback.mapped_data[read_index]);
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    std::memcpy(memory_->TranslatePhysical(memexport_range.base_address_dwords << 2),
-                readback_bytes, memexport_range.size_bytes);
+    memory_->CopyToPhysical(memexport_range.base_address_dwords << 2, readback_bytes,
+                            memexport_range.size_bytes);
     readback_bytes += memexport_range.size_bytes;
   }
 
@@ -4681,7 +4681,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 
     uint8_t* destination = memory_->TranslatePhysical(written_address);
     if (destination) {
-      std::memcpy(destination, readback.mapped_data[read_index], written_length);
+      memory_->CopyToPhysical(written_address, readback.mapped_data[read_index], written_length);
     }
   }
 

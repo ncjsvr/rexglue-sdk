@@ -81,6 +81,15 @@ uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_s
 
 static memory::Memory* active_memory_ = nullptr;
 
+// MCLA-Reborn (T-017): external arena, see Memory::SetExternalArena.
+static uint8_t* external_virtual_membase_ = nullptr;
+static uint8_t* external_physical_membase_ = nullptr;
+
+void Memory::SetExternalArena(uint8_t* virtual_membase, uint8_t* physical_membase) {
+  external_virtual_membase_ = virtual_membase;
+  external_physical_membase_ = physical_membase;
+}
+
 void CrashDump() {
   static std::atomic<int> in_crash_dump(0);
   if (in_crash_dump.fetch_add(1)) {
@@ -132,6 +141,20 @@ Memory::~Memory() {
 }
 
 bool Memory::Initialize() {
+  if (external_virtual_membase_) {
+    // MCLA-Reborn (T-017): guest memory lives in the harness's wasmtime shared memory, one
+    // range per guest address and no aliased views (ADR-0009).
+    virtual_membase_ = external_virtual_membase_;
+    physical_membase_ = external_physical_membase_;
+    canonical_physical_ = true;
+    physical_page_view_.assign(0x20000000 / 4096, 0);
+    REXSYS_INFO("Guest memory in an external arena: virtual base 0x{:016X}, physical bookkeeping "
+                "0x{:016X}, canonical physical ranges (no aliased views)",
+                reinterpret_cast<uintptr_t>(virtual_membase_),
+                reinterpret_cast<uintptr_t>(physical_membase_));
+    return InitializeHeaps();
+  }
+
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
   // Create main page file-backed mapping. This is all reserved but
@@ -189,7 +212,10 @@ bool Memory::Initialize() {
   REXSYS_INFO("Guest memory arena mapped: virtual base 0x{:016X}, physical base 0x{:016X}",
               reinterpret_cast<uintptr_t>(virtual_membase_),
               reinterpret_cast<uintptr_t>(physical_membase_));
+  return InitializeHeaps();
+}
 
+bool Memory::InitializeHeaps() {
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestVirtual, 0x00000000,
                               0x40000000, 4096);
@@ -257,8 +283,7 @@ bool Memory::Initialize() {
                          memory::kMemoryProtectRead | memory::kMemoryProtectWrite, false,
                          &unknown_xex_range);
 
-  uint32_t value_to_write = rex::byte_swap(uint32_t(0x2a6e3f38));
-  std::memcpy(TranslateVirtual(0x80000000 + 0x1C), &value_to_write, sizeof(uint32_t));
+  rex::memory::store_and_swap<uint32_t>(TranslateVirtual(0x80000000 + 0x1C), 0x2a6e3f38);
 
   return true;
 }
@@ -474,17 +499,165 @@ uint32_t Memory::GetPhysicalAddress(uint32_t address) const {
 }
 
 void Memory::Zero(uint32_t address, uint32_t size) {
-  std::memset(TranslateVirtual(address), 0, size);
+  Fill(address, size, 0);
 }
 
 void Memory::Fill(uint32_t address, uint32_t size, uint8_t value) {
-  std::memset(TranslateVirtual(address), value, size);
+  uint8_t* p = TranslateVirtual(address);
+  if (guest_storage::contains(p) && ((address | size) & 3)) {
+    // Swapped guest storage: the partial words at the edges are filled byte by byte.
+    for (uint32_t i = 0; i < size; ++i) {
+      guest_storage::store<uint8_t>(p + i, value);
+    }
+    return;
+  }
+  std::memset(p, value, size);
 }
 
 void Memory::Copy(uint32_t dest, uint32_t src, uint32_t size) {
   uint8_t* pdest = TranslateVirtual(dest);
   const uint8_t* psrc = TranslateVirtual(src);
+  if (guest_storage::contains(pdest) && ((dest | src | size) & 3)) {
+    for (uint32_t i = 0; i < size; ++i) {
+      guest_storage::store<uint8_t>(pdest + i, guest_storage::load<uint8_t>(psrc + i));
+    }
+    return;
+  }
   std::memcpy(pdest, psrc, size);
+}
+
+uint32_t Memory::PhysicalToCanonicalVirtual(uint32_t physical_address) const {
+  physical_address &= 0x1FFFFFFF;
+  switch (physical_page_view_.empty() ? 0 : physical_page_view_[physical_address >> 12]) {
+    case 2:
+      return 0xC0000000 + physical_address;
+    case 3:
+      return 0xE0000000 + physical_address - 0x1000;
+    default:
+      return 0xA0000000 + physical_address;
+  }
+}
+
+namespace {
+// Guest virtual address of physical page p in view v (1 A, 2 C, 3 E), or 0 if it has none.
+uint32_t ViewAddress(int view, uint32_t physical_address) {
+  switch (view) {
+    case 1:
+      return 0xA0000000 + physical_address;
+    case 2:
+      return 0xC0000000 + physical_address;
+    case 3:
+      return physical_address >= 0x1000 && physical_address < 0x1FD00000 + 0x1000
+                 ? 0xE0000000 + physical_address - 0x1000
+                 : 0;
+  }
+  return 0;
+}
+int ViewOf(uint32_t virtual_address) {
+  return virtual_address >= 0xE0000000 ? 3 : virtual_address >= 0xC0000000 ? 2 : 1;
+}
+uint32_t PhysicalOf(uint32_t virtual_address) {
+  int view = ViewOf(virtual_address);
+  return view == 3 ? virtual_address - 0xE0000000 + 0x1000
+                   : virtual_address - (view == 2 ? 0xC0000000 : 0xA0000000);
+}
+}  // namespace
+
+void Memory::SetPhysicalOwner(uint32_t virtual_address, uint32_t size, bool allocated) {
+  if (!canonical_physical_ || virtual_address < 0xA0000000 || !size) {
+    return;
+  }
+  const int view = ViewOf(virtual_address);
+  const uint32_t first = PhysicalOf(virtual_address) & ~0xFFFu;
+  const uint32_t end =
+      uint32_t(std::min<uint64_t>(uint64_t(PhysicalOf(virtual_address)) + size, 0x20000000));
+  for (uint32_t p = first; p < end; p += 4096) {
+    physical_page_view_[p >> 12] = allocated ? uint8_t(view) : 0;
+    if (!alias_callback_) {
+      continue;
+    }
+    for (int other = 1; other <= 3; ++other) {
+      uint32_t va = other == view ? 0 : ViewAddress(other, p);
+      if (va) {
+        rex::memory::Protect(virtual_membase_ + va, 4096,
+                             allocated ? rex::memory::PageAccess::kNoAccess
+                                       : rex::memory::PageAccess::kReadWrite,
+                             nullptr);
+      }
+    }
+  }
+}
+
+void Memory::CopyFromPhysical(void* dest, uint32_t physical_address, size_t size) const {
+  auto d = static_cast<uint8_t*>(dest);
+  if (!canonical_physical_) {
+    std::memcpy(d, TranslatePhysical(physical_address), size);
+    return;
+  }
+  while (size) {
+    size_t n = std::min<size_t>(size, 4096 - (physical_address & 0xFFF));
+    rex::memory::copy_from_guest(d, TranslatePhysical(physical_address), n);
+    d += n, physical_address += uint32_t(n), size -= n;
+  }
+}
+
+void Memory::CopyToPhysical(uint32_t physical_address, const void* src, size_t size) {
+  auto s = static_cast<const uint8_t*>(src);
+  if (!canonical_physical_) {
+    std::memcpy(TranslatePhysical(physical_address), s, size);
+    return;
+  }
+  while (size) {
+    size_t n = std::min<size_t>(size, 4096 - (physical_address & 0xFFF));
+    rex::memory::copy_to_guest(TranslatePhysical(physical_address), s, n);
+    s += n, physical_address += uint32_t(n), size -= n;
+  }
+}
+
+void Memory::EnableAliasWatch(AliasAccessCallback callback) {
+  alias_callback_ = callback;
+  alias_page_logged_.assign(0x60000000 / 4096, 0);
+  // Protect the alias pages of every physical allocation made so far.
+  for (uint32_t p = 0; p < 0x20000000; p += 4096) {
+    int view = physical_page_view_[p >> 12];
+    for (int other = 1; view && other <= 3; ++other) {
+      uint32_t va = other == view ? 0 : ViewAddress(other, p);
+      if (va) {
+        rex::memory::Protect(virtual_membase_ + va, 4096, rex::memory::PageAccess::kNoAccess,
+                             nullptr);
+      }
+    }
+  }
+}
+
+bool Memory::HandleAliasAccess(void* host_address, bool is_write) {
+  if (!alias_callback_) {
+    return false;
+  }
+  uint64_t offset = reinterpret_cast<uint8_t*>(host_address) - virtual_membase_;
+  if (offset < 0xA0000000 || offset > 0xFFFFFFFF) {
+    return false;
+  }
+  uint32_t va = uint32_t(offset);
+  int view = ViewOf(va);
+  uint32_t p = PhysicalOf(va);
+  if (p >= 0x20000000) {
+    return false;
+  }
+  int owner = physical_page_view_[p >> 12];
+  if (!owner || owner == view) {
+    return false;
+  }
+  ++alias_access_count_;
+  uint32_t page = (va - 0xA0000000) >> 12;
+  if (!alias_page_logged_[page]) {
+    alias_page_logged_[page] = 1;
+    alias_callback_(va, ViewAddress(owner, p & ~0xFFFu) + (va & 0xFFF), is_write);
+  }
+  // Allow it from now on (the access reaches this view's own, separate copy of the page).
+  rex::memory::Protect(virtual_membase_ + (va & ~0xFFFu), 4096,
+                       rex::memory::PageAccess::kReadWrite, nullptr);
+  return true;
 }
 
 uint32_t Memory::SearchAligned(uint32_t start, uint32_t end, const uint32_t* values,
@@ -544,6 +717,9 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
 
 bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
                                      void* host_address, bool is_write) {
+  if (canonical_physical_ && HandleAliasAccess(host_address, is_write)) {
+    return true;  // MCLA-Reborn (T-017): an access through an alias view, logged
+  }
   // Access via physical_membase_ is special, when need to bypass everything
   // (for instance, for a data provider to actually write the data) so only
   // triggering callbacks on virtual memory regions.
@@ -1884,7 +2060,9 @@ void PhysicalHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType
                               uint32_t heap_base, uint32_t heap_size, uint32_t page_size,
                               VirtualHeap* parent_heap) {
   uint32_t host_address_offset;
-  if (heap_base >= 0xE0000000 && rex::memory::allocation_granularity() > 0x1000) {
+  if (memory->canonical_physical_) {
+    host_address_offset = 0;  // external arena: guest address ga is at membase + ga exactly
+  } else if (heap_base >= 0xE0000000 && rex::memory::allocation_granularity() > 0x1000) {
     host_address_offset = 0x1000;
   } else {
     host_address_offset = 0;
@@ -1935,6 +2113,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  memory_->SetPhysicalOwner(address, size, true);
   *out_address = address;
   return true;
 }
@@ -1968,6 +2147,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t ali
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  memory_->SetPhysicalOwner(address, size, true);
 
   return true;
 }
@@ -2006,6 +2186,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint3
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  memory_->SetPhysicalOwner(address, size, true);
   *out_address = address;
   return true;
 }
@@ -2049,6 +2230,7 @@ bool PhysicalHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   // thus callback handlers will keep considering this range valid forever.
   uint32_t region_size;
   if (QuerySize(base_address, &region_size)) {
+    memory_->SetPhysicalOwner(base_address, region_size, false);
     TriggerCallbacks(std::move(global_lock), base_address, region_size, true, true);
   }
 

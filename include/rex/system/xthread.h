@@ -71,8 +71,8 @@ constexpr uint32_t X_TLS_OUT_OF_INDEXES = UINT32_MAX;
 
 struct XDPC {
   rex::be<uint16_t> type;
-  uint8_t selected_cpu_number;
-  uint8_t desired_cpu_number;
+  rex::be<uint8_t> selected_cpu_number;
+  rex::be<uint8_t> desired_cpu_number;
   X_LIST_ENTRY list_entry;
   rex::be<uint32_t> routine;
   rex::be<uint32_t> context;
@@ -96,9 +96,9 @@ struct XAPC {
   // KAPC is 0x28(40) bytes? (what's passed to ExAllocatePoolWithTag)
   // This is 4b shorter than NT - looks like the reserved dword at +4 is gone.
   // NOTE: stored in guest memory.
-  uint16_t type;                      // +0
-  uint8_t apc_mode;                   // +2
-  uint8_t enqueued;                   // +3
+  rex::be<uint16_t> type;                      // +0
+  rex::be<uint8_t> apc_mode;                   // +2
+  rex::be<uint8_t> enqueued;                   // +3
   rex::be<uint32_t> thread_ptr;       // +4
   X_LIST_ENTRY list_entry;            // +8
   rex::be<uint32_t> kernel_routine;   // +16
@@ -143,7 +143,7 @@ struct X_KPRCB {
   TypedGuestPointer<X_KTHREAD> current_thread;       // 0x0
   TypedGuestPointer<X_KTHREAD> next_thread;          // 0x4
   TypedGuestPointer<X_KTHREAD> idle_thread;          // 0x8
-  uint8_t current_cpu;                               // 0xC
+  rex::be<uint8_t> current_cpu;                               // 0xC
   uint8_t unk_D[3];                                  // 0xD
   rex::be<uint32_t> processor_mask;                  // 0x10
   rex::be<uint32_t> dpc_clock;                       // 0x14
@@ -177,19 +177,19 @@ struct X_KPCR {
   union {
     rex::be<uint16_t> software_interrupt_state;  // 0x8
     struct {
-      uint8_t generic_software_interrupt;    // 0x8
-      uint8_t apc_software_interrupt_state;  // 0x9
+      rex::be<uint8_t> generic_software_interrupt;    // 0x8
+      rex::be<uint8_t> apc_software_interrupt_state;  // 0x9
     };
   };
   rex::be<uint16_t> unk_0A;              // 0xA
-  uint8_t processtype_value_in_dpc;      // 0xC
-  uint8_t timeslice_ended;               // 0xD
-  uint8_t timer_pending;                 // 0xE
+  rex::be<uint8_t> processtype_value_in_dpc;      // 0xC
+  rex::be<uint8_t> timeslice_ended;               // 0xD
+  rex::be<uint8_t> timer_pending;                 // 0xE
   uint8_t unk_0F;                        // 0xF
   rex::be<uint32_t> thread_fpu_related;  // 0x10
   rex::be<uint32_t> thread_vmx_related;  // 0x14
-  uint8_t current_irql;                  // 0x18
-  uint8_t background_scheduling_active;  // 0x19
+  rex::be<uint8_t> current_irql;                  // 0x18
+  rex::be<uint8_t> background_scheduling_active;  // 0x19
   uint8_t background_scheduling_1A;      // 0x1A
   uint8_t background_scheduling_1B;      // 0x1B
   rex::be<uint32_t> timer_related;       // 0x1C
@@ -224,37 +224,37 @@ struct X_KTHREAD {
   rex::be<uint32_t> stack_limit;     // 0x60
   rex::be<uint32_t> stack_kernel;    // 0x64
   rex::be<uint32_t> tls_address;     // 0x68
-  uint8_t thread_state;              // 0x6C
+  rex::be<uint8_t> thread_state;              // 0x6C
   uint8_t alerted[2];                // 0x6D
-  uint8_t alertable;                 // 0x6F
-  uint8_t priority;                  // 0x70
-  uint8_t fpu_exceptions_on;         // 0x71
-  uint8_t process_type_dup;          // 0x72 (same as process_type below)
-  uint8_t process_type;              // 0x73 (referenced most frequently)
+  rex::be<uint8_t> alertable;                 // 0x6F
+  rex::be<uint8_t> priority;                  // 0x70
+  rex::be<uint8_t> fpu_exceptions_on;         // 0x71
+  rex::be<uint8_t> process_type_dup;          // 0x72 (same as process_type below)
+  rex::be<uint8_t> process_type;              // 0x73 (referenced most frequently)
   // apc_mode determines which list an apc goes into
   util::X_TYPED_LIST<XAPC, offsetof(XAPC, list_entry)> apc_lists[2];  // 0x74
   TypedGuestPointer<X_KPROCESS> process;                              // 0x84
-  uint8_t executing_kernel_apc;                                       // 0x88
-  uint8_t deferred_apc_software_interrupt_state;                      // 0x89
-  uint8_t user_apc_pending;                                           // 0x8A
-  uint8_t may_queue_apcs;                                             // 0x8B
+  rex::be<uint8_t> executing_kernel_apc;                                       // 0x88
+  rex::be<uint8_t> deferred_apc_software_interrupt_state;                      // 0x89
+  rex::be<uint8_t> user_apc_pending;                                           // 0x8A
+  rex::be<uint8_t> may_queue_apcs;                                             // 0x8B
   X_KSPINLOCK apc_lock;                                               // 0x8C
   rex::be<uint32_t> num_context_switches_to;                          // 0x90
   X_LIST_ENTRY ready_prcb_entry;                                      // 0x94
   rex::be<uint32_t> msr_mask;                                         // 0x9C
   rex::be<X_STATUS> wait_result;                                      // 0xA0
-  uint8_t wait_irql;                                                  // 0xA4
+  rex::be<uint8_t> wait_irql;                                                  // 0xA4
   uint8_t unk_A5[0xB];                                                // 0xA5
   int32_t apc_disable_count;                                          // 0xB0
   rex::be<int32_t> quantum;                                           // 0xB4
   uint8_t unk_B8;                                                     // 0xB8
   uint8_t unk_B9;                                                     // 0xB9
   uint8_t unk_BA;                                                     // 0xBA
-  uint8_t boost_disabled;                                             // 0xBB
-  uint8_t suspend_count;                                              // 0xBC
-  uint8_t was_preempted;                                              // 0xBD
-  uint8_t terminated;                                                 // 0xBE
-  uint8_t current_cpu;                                                // 0xBF
+  rex::be<uint8_t> boost_disabled;                                             // 0xBB
+  rex::be<uint8_t> suspend_count;                                              // 0xBC
+  rex::be<uint8_t> was_preempted;                                              // 0xBD
+  rex::be<uint8_t> terminated;                                                 // 0xBE
+  rex::be<uint8_t> current_cpu;                                                // 0xBF
   TypedGuestPointer<X_KPRCB> a_prcb_ptr;                              // 0xC0
   TypedGuestPointer<X_KPRCB> another_prcb_ptr;                        // 0xC4
   uint8_t unk_C8;                                                     // 0xC8

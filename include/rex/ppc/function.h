@@ -127,8 +127,8 @@ struct ArgTranslator {
       }
     }
     // Stack arguments at r1 + 0x54 + ((arg - 8) * 8)
-    return __builtin_bswap32(
-        *rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)));
+    return rex::memory::load_and_swap<uint32_t>(
+        rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)));
   }
 
   // Get float/double argument value from FPR
@@ -201,8 +201,9 @@ struct ArgTranslator {
       }
     }
     // Stack-passed arguments (mirrors GetIntegerArgumentValue layout)
-    *rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)) =
-        __builtin_bswap32(static_cast<uint32_t>(value));
+    rex::memory::store_and_swap<uint32_t>(
+        rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)),
+        static_cast<uint32_t>(value));
   }
 
   // Set float/double argument value

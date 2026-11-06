@@ -21,6 +21,19 @@
 namespace rex {
 namespace memory {
 
+// MCLA-Reborn (T-017): see SetExternalArena in rex/memory/utils.h.
+static uintptr_t external_arena_base_ = 0;
+static uintptr_t external_arena_size_ = 0;
+
+void SetExternalArena(void* base, size_t size) {
+  external_arena_base_ = reinterpret_cast<uintptr_t>(base);
+  external_arena_size_ = size;
+}
+
+bool IsInExternalArena(const void* address) {
+  return reinterpret_cast<uintptr_t>(address) - external_arena_base_ < external_arena_size_;
+}
+
 size_t page_size() {
   static size_t value = 0;
   if (!value) {
@@ -93,6 +106,13 @@ bool IsWritableExecutableMemorySupported() {
 
 void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
                  PageAccess access) {
+  if (IsInExternalArena(base_address)) {
+    // Already reserved by its owner: reserving is a no-op, committing only commits.
+    if (allocation_type == AllocationType::kReserve) {
+      return base_address;
+    }
+    allocation_type = AllocationType::kCommit;
+  }
   DWORD alloc_type = 0;
   switch (allocation_type) {
     case AllocationType::kReserve:
@@ -117,6 +137,9 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
 }
 
 bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocation_type) {
+  if (deallocation_type == DeallocationType::kRelease && IsInExternalArena(base_address)) {
+    return true;  // the arena's owner releases it
+  }
   DWORD free_type = 0;
   switch (deallocation_type) {
     case DeallocationType::kRelease:

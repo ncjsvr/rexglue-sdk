@@ -74,6 +74,13 @@ class FunctionDispatcher : public IModuleRegistrar {
   uint64_t ExecuteTrap(ThreadState* thread_state, uint32_t address, uint64_t args[],
                        size_t arg_count);
 
+  // MCLA-Reborn (T-017): the native harness runs guest functions as translated wasm. When an
+  // executor is set, every guest call the runtime makes by address (thread start, Execute*,
+  // APCs, interrupts) goes to it instead of the registered host function.
+  using GuestExecutor = void (*)(::PPCContext& ctx, uint32_t guest_address);
+  static void SetGuestExecutor(GuestExecutor executor);
+  static void CallGuest(::PPCFunc* fn, ::PPCContext& ctx, uint8_t* base, uint32_t guest_address);
+
   // Shared thunk region size per module.
   static constexpr uint32_t kThunkReserveSize = 0x10000;  // 64KB
 

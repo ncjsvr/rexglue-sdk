@@ -990,11 +990,22 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   bool is_memory = (wait_info & 0x10) != 0;
 
   bool matched = false;
+  auto wait_start = std::chrono::steady_clock::now();
+  bool wait_reported = false;
   do {
     uint32_t value = 0;
+    if (!wait_reported && std::chrono::steady_clock::now() - wait_start > std::chrono::seconds(2)) {
+      // MCLA-Reborn (T-017): name a WAIT_REG_MEM that never completes.
+      wait_reported = true;
+      REXGPU_WARN("WAIT_REG_MEM still waiting after 2 s: {} {:08X} (function {}, ref {:08X}, mask "
+                  "{:08X}); current value {:08X}",
+                  is_memory ? "memory" : "register", poll_reg_addr, wait_info & 7, ref, mask,
+                  is_memory ? memory::load<uint32_t>(
+                                  memory_->TranslatePhysical(poll_reg_addr & ~uint32_t(0x3)))
+                            : ReadRegisterValue(poll_reg_addr));
+    }
     if (is_memory) {
-      value =
-          *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(poll_reg_addr & ~uint32_t(0x3)));
+      value = memory::load<uint32_t>(memory_->TranslatePhysical(poll_reg_addr & ~uint32_t(0x3)));
       value = xenos::GpuSwap(value, static_cast<xenos::Endian>(poll_reg_addr & 0x3));
     } else {
       value = ReadRegisterValue(poll_reg_addr);
@@ -1241,8 +1252,14 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
       1,                                         // max z
   };
   assert_true(endianness == xenos::Endian::k8in16);
-  memory::copy_and_swap_16_unaligned(memory_->TranslatePhysical(address), extents,
-                                     rex::countof(extents));
+  if (guest_storage::enabled()) {
+    for (size_t i = 0; i < rex::countof(extents); ++i) {  // swapped guest storage (T-017)
+      memory::store_and_swap<uint16_t>(memory_->TranslatePhysical(address) + i * 2, extents[i]);
+    }
+  } else {
+    memory::copy_and_swap_16_unaligned(memory_->TranslatePhysical(address), extents,
+                                       rex::countof(extents));
+  }
   return true;
 }
 

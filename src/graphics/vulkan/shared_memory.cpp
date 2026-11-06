@@ -301,9 +301,10 @@ bool VulkanSharedMemory::UploadRanges(
         break;
       }
       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
-      std::memcpy(upload_buffer_mapping,
-                  memory().TranslatePhysical(upload_range_start << page_size_log2()),
-                  upload_buffer_size);
+      // MCLA-Reborn (T-017): per page through canonical ranges, and from swapped guest storage
+      // back to guest byte order, so the GPU copy matches the native layout (ADR-0009).
+      memory().CopyFromPhysical(upload_buffer_mapping, upload_range_start << page_size_log2(),
+                                upload_buffer_size);
       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,

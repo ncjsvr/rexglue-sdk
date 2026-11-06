@@ -457,8 +457,8 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     // Load of a memory value - read from range, swap, and store in the
     // register.
     uint32_t value = range->read(nullptr, range->callback_context, fault_guest_virtual_address);
-    if (!decoded_load_store.byte_swap) {
-      // We swap only if it's not a movbe, as otherwise we are swapping twice.
+    if (!decoded_load_store.byte_swap && !guest_storage::enabled()) {
+      // We swap only if it's not a movbe, as otherwise we are swapping twice (see below).
       value = rex::byte_swap(value);
     }
 #if REX_ARCH_AMD64
@@ -499,8 +499,9 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
 #else
 #error Register value reading not implemented for the target CPU architecture.
 #endif  // REX_ARCH
-      if (!decoded_load_store.byte_swap) {
-        // We swap only if it's not a movbe, as otherwise we are swapping twice.
+      if (!decoded_load_store.byte_swap && !guest_storage::enabled()) {
+        // We swap only if it's not a movbe, as otherwise we are swapping twice. With swapped
+        // guest storage (MCLA-Reborn harness) a plain load or store already holds the value.
         value = rex::byte_swap(value);
       }
     }

@@ -21,6 +21,15 @@ namespace rex::runtime {
 
 thread_local ThreadState* thread_state_ = nullptr;
 
+// MCLA-Reborn (T-017): see SetContextAllocator.
+static ThreadState::ContextAllocator context_allocator_ = nullptr;
+static ThreadState::ContextReleaser context_releaser_ = nullptr;
+
+void ThreadState::SetContextAllocator(ContextAllocator allocate, ContextReleaser release) {
+  context_allocator_ = allocate;
+  context_releaser_ = release;
+}
+
 ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_address,
                          memory::Memory* memory)
     : memory_(memory), pcr_address_(pcr_address), thread_id_(thread_id) {
@@ -29,6 +38,13 @@ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_a
     // set so people know what's up.
     uint32_t system_thread_handle = rex::thread::current_thread_system_id();
     thread_id_ = 0x80000000 | system_thread_handle;
+  }
+
+  if (context_allocator_) {
+    if (::PPCContext* external = context_allocator_()) {
+      context_ = external;
+      external_context_ = true;
+    }
   }
 
   // Set initial registers
@@ -42,6 +58,9 @@ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_a
 ThreadState::~ThreadState() {
   if (thread_state_ == this) {
     thread_state_ = nullptr;
+  }
+  if (external_context_ && context_releaser_) {
+    context_releaser_(context_);
   }
 }
 

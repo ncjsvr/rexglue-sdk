@@ -402,8 +402,42 @@ class Memory {
   // Note that the contents at the specified host address are big-endian.
   template <typename T = uint8_t*>
   inline T TranslatePhysical(uint32_t guest_address) const {
+    if (canonical_physical_) [[unlikely]] {
+      return reinterpret_cast<T>(virtual_membase_ +
+                                 PhysicalToCanonicalVirtual(guest_address & 0x1FFFFFFF));
+    }
     return reinterpret_cast<T>(physical_membase_ + (guest_address & 0x1FFFFFFF));
   }
+
+  //==========================================================================
+  // External arena (MCLA-Reborn, T-017; docs/research/native-harness.md)
+  //==========================================================================
+  // The native harness places guest memory inside its wasmtime shared memory instead of a
+  // file mapping: guest address ga lives at virtual_membase + ga for every ga, with no aliased
+  // views (ADR-0009). Each physical allocation then has ONE canonical guest range, the one in
+  // the view (0xA0000000, 0xC0000000 or 0xE0000000) it was allocated through, and
+  // TranslatePhysical resolves to it. `physical_membase` is a separate 512 MiB range used only
+  // for the physical heap's own bookkeeping. Must be called before Initialize().
+  static void SetExternalArena(uint8_t* virtual_membase, uint8_t* physical_membase);
+  bool uses_external_arena() const { return canonical_physical_; }
+
+  // Guest virtual address of the canonical range for physical address p (0..0x1FFFFFFF):
+  // the view the page was allocated through, or the 0xA0000000 view if it is unallocated.
+  uint32_t PhysicalToCanonicalVirtual(uint32_t physical_address) const;
+
+  // Alias watch (T-017 acceptance criterion): while enabled, the pages of each physical
+  // allocation are made inaccessible in the two views it was not allocated through, and an
+  // access to one is logged (once per page) through the callback, then allowed.
+  using AliasAccessCallback = void (*)(uint32_t guest_address, uint32_t canonical_address,
+                                       bool is_write);
+
+  // Copies guest physical memory as the guest sees its bytes (big-endian byte order), page by
+  // page through each page's canonical range, and the reverse. With the default file mapping
+  // these are plain copies through physical_membase.
+  void CopyFromPhysical(void* dest, uint32_t physical_address, size_t size) const;
+  void CopyToPhysical(uint32_t physical_address, const void* src, size_t size);
+  void EnableAliasWatch(AliasAccessCallback callback);
+  uint64_t alias_access_count() const { return alias_access_count_; }
 
   // Translates a host address to a guest virtual address.
   // Note that the contents at the returned host address are big-endian.
@@ -624,6 +658,16 @@ class Memory {
   rex::thread::global_critical_region global_critical_region_;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
+
+  // External arena (MCLA-Reborn, T-017): see SetExternalArena.
+  bool InitializeHeaps();
+  void SetPhysicalOwner(uint32_t virtual_address, uint32_t size, bool allocated);
+  bool HandleAliasAccess(void* host_address, bool is_write);
+  bool canonical_physical_ = false;
+  std::vector<uint8_t> physical_page_view_;  // per 4 KiB physical page: 0 none, 1 A, 2 C, 3 E
+  AliasAccessCallback alias_callback_ = nullptr;
+  std::vector<uint8_t> alias_page_logged_;  // per 4 KiB guest page in 0xA0000000+
+  uint64_t alias_access_count_ = 0;
 };
 
 }  // namespace rex::memory

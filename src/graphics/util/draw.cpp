@@ -800,8 +800,9 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
       regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero ? 0.5f : 0.0f;
   int32_t vertices_fixed[6];
   for (size_t i = 0; i < rex::countof(vertices_fixed); ++i) {
-    vertices_fixed[i] = ui::FloatToD3D11Fixed16p8(xenos::GpuSwap(vertices_guest[i], fetch.endian) +
-                                                  half_pixel_offset);
+    // memory::load reads the guest's bytes also from swapped guest storage (MCLA-Reborn, T-017).
+    vertices_fixed[i] = ui::FloatToD3D11Fixed16p8(
+        xenos::GpuSwap(memory::load<float>(vertices_guest + i), fetch.endian) + half_pixel_offset);
   }
   // Inclusive.
   int32_t x0 = std::min(std::min(vertices_fixed[0], vertices_fixed[2]), vertices_fixed[4]);

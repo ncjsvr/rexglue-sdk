@@ -26,6 +26,10 @@ REXCVAR_DEFINE_BOOL(writable_executable_memory, true, "Memory",
 namespace rex {
 namespace memory {
 
+void EnableSwappedGuestStorage(void* guest_base, size_t size) {
+  guest_storage::EnableLocal(guest_base, size);
+}
+
 bool IsWritableExecutableMemoryPreferred() {
   return REXCVAR_GET(writable_executable_memory);
 }

@@ -201,7 +201,7 @@ X_STATUS UserModule::LoadXexContinue() {
   guest_xex_header_ = memory()->SystemHeapAlloc(header->header_size);
 
   uint8_t* xex_header_ptr = memory()->TranslateVirtual(guest_xex_header_);
-  std::memcpy(xex_header_ptr, header, header->header_size);
+  rex::memory::copy_to_guest(xex_header_ptr, header, header->header_size);  // swapped-storage aware
 
   // Cache some commonly used headers...
   this->xex_module()->GetOptHeader(XEX_HEADER_ENTRY_POINT, &entry_point_);

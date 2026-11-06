@@ -139,6 +139,17 @@ void AlignedFree(T* ptr) {
 #endif
 }
 
+// MCLA-Reborn (T-017): an externally owned, already reserved range of host memory (the native
+// harness's wasmtime shared memory). Inside it AllocFixed with kReserve returns the address
+// unchanged, kReserveCommit only commits, and DeallocFixed with kRelease does nothing; commit,
+// decommit and protection work as usual. Not set by any other build.
+void SetExternalArena(void* base, size_t size);
+bool IsInExternalArena(const void* address);
+
+// MCLA-Reborn (T-017): turns on swapped guest storage (rex/types.h) for the code in this
+// module (the runtime DLL). The caller also calls guest_storage::EnableLocal for its own.
+void EnableSwappedGuestStorage(void* guest_base, size_t size);
+
 // Opaque file mapping handle.
 // On Windows this holds a HANDLE (void*), on POSIX a file descriptor (int).
 // We use intptr_t to hold either without platform guards.
@@ -180,6 +191,25 @@ void copy_and_swap_16_in_32_unaligned(void* dest, const void* src, size_t count)
 
 template <typename T>
 void copy_and_swap(T* dest, const T* src, size_t count) {
+  if (guest_storage::enabled() && sizeof(T) <= 8 &&
+      (guest_storage::contains(src) || guest_storage::contains(dest))) [[unlikely]] {
+    // Swapped guest storage (MCLA-Reborn harness): element by element in the guest layout.
+    using U = guest_storage::uint_of<T>;
+    for (size_t i = 0; i < count; ++i) {
+      U v;
+      if (guest_storage::contains(src + i)) {
+        v = guest_storage::load<U>(src + i);
+      } else {
+        std::memcpy(&v, src + i, sizeof(U));  // host values going into guest memory
+      }
+      if (guest_storage::contains(dest + i)) {
+        guest_storage::store<U>(dest + i, v);
+      } else {
+        std::memcpy(dest + i, &v, sizeof(U));
+      }
+    }
+    return;
+  }
   bool is_aligned =
       reinterpret_cast<uintptr_t>(dest) % 32 == 0 && reinterpret_cast<uintptr_t>(src) % 32 == 0;
   if (sizeof(T) == 1) {
@@ -218,13 +248,25 @@ template <typename T>
 inline T load(const void* mem) {
   static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
   T result;
+  if (guest_storage::contains(mem)) [[unlikely]] {
+    // Swapped guest storage: the bytes as the guest sees them (what a native raw load gives).
+    auto d = reinterpret_cast<uint8_t*>(&result);
+    for (size_t i = 0; i < sizeof(T); ++i) {
+      d[i] = guest_storage::load<uint8_t>(static_cast<const uint8_t*>(mem) + i);
+    }
+    return result;
+  }
   std::memcpy(&result, mem, sizeof(T));
   return result;
 }
 
-/// Load a value of type T from memory and byte-swap it.
+/// Load a value of type T from memory and byte-swap it. Inside swapped guest storage
+/// (MCLA-Reborn harness, rex/types.h) this reads the guest value in that layout instead.
 template <typename T>
 inline T load_and_swap(const void* mem) {
+  if (guest_storage::contains(mem)) [[unlikely]] {
+    return guest_storage::load<T>(mem);
+  }
   return byte_swap(load<T>(mem));
 }
 
@@ -258,13 +300,103 @@ inline std::u16string load_and_swap<std::u16string>(const void* mem) {
 template <typename T>
 inline void store(void* mem, const T& value) {
   static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+  if (guest_storage::contains(mem)) [[unlikely]] {
+    auto s = reinterpret_cast<const uint8_t*>(&value);
+    for (size_t i = 0; i < sizeof(T); ++i) {
+      guest_storage::store<uint8_t>(static_cast<uint8_t*>(mem) + i, s[i]);
+    }
+    return;
+  }
   std::memcpy(mem, &value, sizeof(T));
 }
 
-/// Store a byte-swapped value of type T to memory.
+/// Store a byte-swapped value of type T to memory (swapped guest storage aware, as above).
 template <typename T>
 inline void store_and_swap(void* mem, const T& value) {
+  if (guest_storage::contains(mem)) [[unlikely]] {
+    guest_storage::store<T>(mem, value);
+    return;
+  }
   store(mem, byte_swap(value));
+}
+
+//=============================================================================
+// Raw byte transfers between host buffers and guest memory (MCLA-Reborn, T-017)
+//=============================================================================
+// Byte streams (file contents, strings, packets) copied into or out of guest memory must be
+// converted at the boundary when guest memory uses swapped storage (ADR-0009). Outside it, or
+// with swapped storage disabled, these are plain memcpy/memset.
+
+/// Copies `size` bytes in guest byte order from `src` into guest memory at host address `dst`.
+inline void copy_to_guest(void* dst, const void* src, size_t size) {
+  if (!guest_storage::contains(dst)) {
+    std::memcpy(dst, src, size);
+    return;
+  }
+  const uintptr_t a = reinterpret_cast<uintptr_t>(dst);
+  auto s = static_cast<const uint8_t*>(src);
+  size_t i = 0;
+  for (; i < size && ((a + i) & 3); ++i) {
+    *reinterpret_cast<uint8_t*>((a + i) ^ 3) = s[i];
+  }
+  for (; i + 4 <= size; i += 4) {
+    uint32_t w;
+    std::memcpy(&w, s + i, 4);
+    w = byte_swap(w);
+    std::memcpy(reinterpret_cast<void*>(a + i), &w, 4);
+  }
+  for (; i < size; ++i) {
+    *reinterpret_cast<uint8_t*>((a + i) ^ 3) = s[i];
+  }
+}
+
+/// Copies `size` bytes in guest byte order out of guest memory at host address `src`.
+inline void copy_from_guest(void* dst, const void* src, size_t size) {
+  if (!guest_storage::contains(src)) {
+    std::memcpy(dst, src, size);
+    return;
+  }
+  const uintptr_t a = reinterpret_cast<uintptr_t>(src);
+  auto d = static_cast<uint8_t*>(dst);
+  size_t i = 0;
+  for (; i < size && ((a + i) & 3); ++i) {
+    d[i] = *reinterpret_cast<const uint8_t*>((a + i) ^ 3);
+  }
+  for (; i + 4 <= size; i += 4) {
+    uint32_t w;
+    std::memcpy(&w, reinterpret_cast<const void*>(a + i), 4);
+    w = byte_swap(w);
+    std::memcpy(d + i, &w, 4);
+  }
+  for (; i < size; ++i) {
+    d[i] = *reinterpret_cast<const uint8_t*>((a + i) ^ 3);
+  }
+}
+
+/// Converts a guest-memory range written as plain big-endian bytes (for example by a loader
+/// that copied file data in) to swapped storage, in place. Word aligned ranges only.
+inline void swap_guest_words_in_place(void* p, size_t size) {
+  if (!guest_storage::contains(p)) {
+    return;
+  }
+  auto w = static_cast<uint32_t*>(p);
+  for (size_t i = 0; i < size / 4; ++i) {
+    w[i] = byte_swap(w[i]);
+  }
+}
+
+/// Reads a NUL-terminated (or `max`-limited) byte string from guest memory.
+inline std::string read_guest_string(const void* src, size_t max = SIZE_MAX) {
+  std::string s;
+  auto p = static_cast<const uint8_t*>(src);
+  for (size_t i = 0; i < max; ++i) {
+    uint8_t c = guest_storage::contains(p + i) ? guest_storage::load<uint8_t>(p + i) : p[i];
+    if (!c) {
+      break;
+    }
+    s.push_back(static_cast<char>(c));
+  }
+  return s;
 }
 
 // String specializations need custom logic

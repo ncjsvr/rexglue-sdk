@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -45,6 +46,132 @@ constexpr T byte_swap(T value) noexcept {
   }
 }
 
+//=============================================================================
+// Swapped guest storage (MCLA-Reborn, T-017, ADR-0009)
+//=============================================================================
+// The MCLA-Reborn native harness runs translated WebAssembly whose guest memory holds 32-bit
+// words in host order: a byte at guest address a lives at a ^ 3, a halfword at a ^ 2, a
+// doubleword is two words (high word first) and so reads as a 64-bit load rotated by 32.
+// When the harness enables it, every big-endian access the runtime makes to a host address
+// inside the guest range follows that layout, while big-endian data in host memory (file
+// headers and the like) keeps its plain meaning. Disabled, which is the default and the only
+// state any other build sees, nothing changes.
+namespace guest_storage {
+
+struct Range {
+  uintptr_t base = 0;
+  uintptr_t size = 0;
+};
+
+// One copy per module (a DLL and the executable each have their own); the harness sets both
+// through Enable() in the runtime DLL and EnableLocal() in its own code.
+inline Range g_range;
+
+inline void EnableLocal(void* base, size_t size) noexcept {
+  g_range.base = reinterpret_cast<uintptr_t>(base);
+  g_range.size = size;
+}
+inline bool enabled() noexcept {
+  return g_range.size != 0;
+}
+inline bool contains(const void* p) noexcept {
+  return reinterpret_cast<uintptr_t>(p) - g_range.base < g_range.size;
+}
+
+template <class T>
+using uint_of = std::conditional_t<
+    sizeof(T) == 8, uint64_t,
+    std::conditional_t<sizeof(T) == 4, uint32_t,
+                       std::conditional_t<sizeof(T) == 2, uint16_t, uint8_t>>>;
+
+// Loads the guest value of type T stored at host address p (inside the guest range).
+template <class T>
+inline T load(const void* p) noexcept {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  using U = uint_of<T>;
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  if constexpr (sizeof(T) == 1) {
+    return std::bit_cast<T>(*reinterpret_cast<const volatile uint8_t*>(a ^ 3));
+  } else if constexpr (sizeof(T) == 2) {
+    if (!(a & 1)) {
+      U v;
+      std::memcpy(&v, reinterpret_cast<const void*>(a ^ 2), 2);
+      return std::bit_cast<T>(v);
+    }
+  } else if constexpr (sizeof(T) == 4) {
+    if (!(a & 3)) {
+      U v;
+      std::memcpy(&v, p, 4);
+      return std::bit_cast<T>(v);
+    }
+  } else {
+    if (!(a & 3)) {
+      U v;
+      std::memcpy(&v, p, 8);
+      return std::bit_cast<T>(static_cast<U>((v << 32) | (v >> 32)));
+    }
+  }
+  U v = 0;  // misaligned: assemble the big-endian value byte by byte
+  for (size_t k = 0; k < sizeof(T); ++k) {
+    v = static_cast<U>((uint64_t(v) << 8) | *reinterpret_cast<const uint8_t*>((a + k) ^ 3));
+  }
+  return std::bit_cast<T>(v);
+}
+
+// Stores the guest value of type T at host address p (inside the guest range).
+template <class T>
+inline void store(void* p, const T& value) noexcept {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  using U = uint_of<T>;
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  U v = std::bit_cast<U>(value);
+  if constexpr (sizeof(T) == 1) {
+    *reinterpret_cast<volatile uint8_t*>(a ^ 3) = v;
+    return;
+  } else if constexpr (sizeof(T) == 2) {
+    if (!(a & 1)) {
+      std::memcpy(reinterpret_cast<void*>(a ^ 2), &v, 2);
+      return;
+    }
+  } else if constexpr (sizeof(T) == 4) {
+    if (!(a & 3)) {
+      std::memcpy(p, &v, 4);
+      return;
+    }
+  } else {
+    if (!(a & 3)) {
+      U r = static_cast<U>((v << 32) | (v >> 32));
+      std::memcpy(p, &r, 8);
+      return;
+    }
+  }
+  for (size_t k = sizeof(T); k-- > 0;) {  // misaligned: byte by byte
+    *reinterpret_cast<uint8_t*>((a + k) ^ 3) = static_cast<uint8_t>(v);
+    v = static_cast<U>(uint64_t(v) >> 8);
+  }
+}
+
+// A guest NUL-terminated string at host address p (inside the guest range), copied out in guest
+// byte order. The view stays valid until the same thread has made 16 more such copies.
+template <class C>
+inline std::basic_string_view<C> string_view_of(const C* p) noexcept {
+  thread_local std::basic_string<C> ring[16];
+  thread_local unsigned next = 0;
+  auto& s = ring[next++ % 16];
+  s.clear();
+  for (const C* q = p;; ++q) {
+    C c = load<C>(q);
+    if (!c) break;
+    if constexpr (sizeof(C) == 2) {
+      c = static_cast<C>((uint16_t(c) >> 8) | (uint16_t(c) << 8));  // callers expect BE units
+    }
+    s.push_back(c);
+  }
+  return s;
+}
+
+}  // namespace guest_storage
+
 template <typename T, std::endian E>
 struct endian_store {
   using value_type = T;  // Type alias for value() in MappedPtr
@@ -53,20 +180,34 @@ struct endian_store {
   endian_store(const T& src) { set(src); }
   endian_store(const endian_store&) = default;
   endian_store& operator=(const endian_store&) = default;
+  // Assigning a plain value goes through set() (rather than a temporary plus a raw copy), so
+  // swapped guest storage gets the right layout.
+  endian_store& operator=(const T& src) {
+    set(src);
+    return *this;
+  }
   operator T() const { return get(); }
 
   void set(const T& src) {
     if constexpr (std::endian::native == E) {
       value = src;
     } else {
+      if (guest_storage::contains(this)) [[unlikely]] {
+        guest_storage::store<T>(this, src);
+        return;
+      }
       value = rex::byte_swap(src);
     }
   }
   T get() const {
     if constexpr (std::endian::native == E) {
       return value;
+    } else {
+      if (guest_storage::contains(this)) [[unlikely]] {
+        return guest_storage::load<T>(this);
+      }
+      return rex::byte_swap(value);
     }
-    return rex::byte_swap(value);
   }
 
   endian_store<T, E>& operator+=(int a) {
@@ -298,6 +439,9 @@ class MappedPtr<char> {
   explicit operator bool() const { return host_ptr_ != nullptr; }
 
   std::string_view value() const {
+    if (host_ptr_ && guest_storage::contains(host_ptr_)) [[unlikely]] {
+      return guest_storage::string_view_of(host_ptr_);  // swapped guest storage (T-017)
+    }
     return host_ptr_ ? std::string_view(host_ptr_) : std::string_view();
   }
 
@@ -340,6 +484,9 @@ class MappedPtr<char16_t> {
   explicit operator bool() const { return host_ptr_ != nullptr; }
 
   std::u16string_view value() const {
+    if (host_ptr_ && guest_storage::contains(host_ptr_)) [[unlikely]] {
+      return guest_storage::string_view_of(host_ptr_);  // swapped guest storage (T-017)
+    }
     return host_ptr_ ? std::u16string_view(host_ptr_) : std::u16string_view();
   }
 

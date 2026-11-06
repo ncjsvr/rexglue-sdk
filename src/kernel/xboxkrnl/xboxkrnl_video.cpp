@@ -456,8 +456,9 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   namespace xenos = rex::graphics::xenos;
 
   xenos::xe_gpu_texture_fetch_t gpu_fetch;
-  memory::copy_and_swap_32_unaligned(&gpu_fetch,
-                                     reinterpret_cast<uint32_t*>(fetch_ptr.host_address()), 6);
+  // The template form reads swapped guest storage correctly (MCLA-Reborn harness, T-017).
+  memory::copy_and_swap<uint32_t>(reinterpret_cast<uint32_t*>(&gpu_fetch),
+                                  reinterpret_cast<const uint32_t*>(fetch_ptr.host_address()), 6);
 
   // The fetch constant passed is not a true GPU fetch constant, but rather, the
   // fetch constant stored in the Direct3D 9 texture header, which contains the

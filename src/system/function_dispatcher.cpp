@@ -52,6 +52,22 @@ PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
   return &InvalidFunctionTrap;
 }
 
+// MCLA-Reborn (T-017): see SetGuestExecutor.
+static FunctionDispatcher::GuestExecutor guest_executor_ = nullptr;
+
+void FunctionDispatcher::SetGuestExecutor(GuestExecutor executor) {
+  guest_executor_ = executor;
+}
+
+void FunctionDispatcher::CallGuest(::PPCFunc* fn, ::PPCContext& ctx, uint8_t* base,
+                                   uint32_t guest_address) {
+  if (guest_executor_) {
+    guest_executor_(ctx, guest_address);
+  } else {
+    fn(ctx, base);
+  }
+}
+
 FunctionDispatcher::FunctionDispatcher(rex::memory::Memory* memory, ExportResolver* export_resolver)
     : memory_(memory), export_resolver_(export_resolver) {}
 
@@ -79,7 +95,7 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   uint64_t previous_lr = ctx->lr;
   ctx->lr = 0xBCBCBCBC;
 
-  fn(*ctx, memory_->virtual_membase());
+  CallGuest(fn, *ctx, memory_->virtual_membase(), address);
 
   ctx->lr = previous_lr;
   ctx->r1.u64 += 64 + 112;

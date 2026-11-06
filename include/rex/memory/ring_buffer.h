@@ -102,6 +102,9 @@ class RingBuffer {
     T imm;
     size_t read = Read(reinterpret_cast<uint8_t*>(&imm), sizeof(T));
     assert_true(read == sizeof(T));
+    if (guest_storage::contains(buffer_) && sizeof(T) == 4) [[unlikely]] {
+      return imm;  // swapped guest storage (MCLA-Reborn harness): words are already host order
+    }
     imm = rex::byte_swap(imm);
     return imm;
   }
@@ -138,6 +141,9 @@ inline uint32_t RingBuffer::ReadAndSwap<uint32_t>() {
   }
   read_offset_ = next_read_offs;
   uint32_t ring_value = *(uint32_t*)(buffer_ + read_offs);
+  if (guest_storage::contains(buffer_)) [[unlikely]] {
+    return ring_value;  // swapped guest storage (MCLA-Reborn harness): words are host order
+  }
   return rex::byte_swap(ring_value);
 }
 
