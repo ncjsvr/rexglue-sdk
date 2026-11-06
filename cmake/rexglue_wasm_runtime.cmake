@@ -266,6 +266,24 @@ add_library(rexruntime_wasm STATIC
     ${REXGLUE_ROOT}/src/input/nop/nop_input_driver.cpp
 )
 add_library(rex::runtime_wasm ALIAS rexruntime_wasm)
+
+# MCLA-Reborn (T-029): what a WebGPU backend in the host needs on top of the GPU base classes:
+# the microcode analysis (Shader), the shared ShaderTranslator with the WGSL translator, and the
+# draw utilities (viewport, scissor, resolve info). Only for the browser runtime build.
+option(REXGLUE_WASM_WEBGPU "Add shader analysis, the WGSL translator and draw utilities" OFF)
+if(REXGLUE_WASM_WEBGPU)
+  target_sources(rexruntime_wasm PRIVATE
+      ${_gpu}/format/ucode.cpp
+      ${_gpu}/pipeline/shader/shader.cpp
+      ${_gpu}/pipeline/shader/translator.cpp
+      ${_gpu}/pipeline/shader/translator_disasm.cpp
+      ${_gpu}/pipeline/shader/wgsl_translator.cpp
+      ${_gpu}/pipeline/shader/wgsl_translator_alu.cpp
+      ${_gpu}/pipeline/shader/wgsl_translator_fetch.cpp
+      ${_gpu}/util/draw.cpp
+      ${REXGLUE_ROOT}/src/ui/graphics_util.cpp)
+  target_compile_definitions(rexruntime_wasm PUBLIC REXGLUE_WASM_WEBGPU=1)
+endif()
 # Consumers compile with the same target flags (wasm64 etc.) and see the same configuration.
 target_compile_options(rexruntime_wasm INTERFACE ${REXGLUE_WASM_RUNTIME_FLAGS})
 target_compile_definitions(rexruntime_wasm PUBLIC

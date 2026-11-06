@@ -136,8 +136,15 @@ bool CommandProcessor::Initialize() {
   }
 
   worker_running_ = true;
+#if defined(__EMSCRIPTEN__)
+  // MCLA-Reborn (T-029): an Emscripten pthread gets exactly the stack it asks for, and the
+  // browser's WebGPU backend translates shaders and decodes textures on this thread.
+  constexpr uint32_t kWorkerStackSize = 4 * 1024 * 1024;
+#else
+  constexpr uint32_t kWorkerStackSize = 128 * 1024;
+#endif
   worker_thread_ = system::object_ref<system::XHostThread>(
-      new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
+      new system::XHostThread(kernel_state_, kWorkerStackSize, 0, [this]() {
         WorkerThreadMain();
         return 0;
       }));
