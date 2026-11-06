@@ -34,6 +34,13 @@ struct FunctionState {
   /// Jump tables found at emission time (mtctr..bctr pattern), keyed by bctr address.
   std::unordered_map<uint32_t, JumpTable> lateJumpTables;
   std::set<std::string>* unimplemented = nullptr;
+  /// setjmp call sites (bl to the configured setjmp_address) -> return address; empty when the
+  /// function has none. With sites, the body is wrapped in a try_table (wasm_function.cpp).
+  std::map<uint32_t, uint32_t> setjmpSites;
+  uint32_t localJmpBuf = 0;     ///< i32: guest jmp_buf address of the last setjmp
+  uint32_t localJmpResume = 0;  ///< i32: 1 + case index to resume at, 0 when no setjmp ran
+  uint32_t localSnapshot = 0;   ///< first of the v128 locals holding the context snapshot
+  uint32_t snapshotCount = 0;
 };
 
 /**
@@ -67,6 +74,10 @@ struct WasmBuilderContext {
   uint32_t uimm() const { return word & 0xFFFF; }
   bool rc() const { return (word & 1) != 0; }
   bool oe() const { return ((word >> 10) & 1) != 0; }
+  /// Decoded operand i, as ReXGlue's C++ builders read it (insn.operands[i]).
+  uint32_t opnd(size_t i) const;
+  /// Record form by mnemonic ('.' suffix), as helpers.h isRecordForm.
+  bool recordName() const;
 
   // --- Stack helpers ---
   void get(uint32_t local) { c.localGet(local); }
@@ -87,6 +98,13 @@ struct WasmBuilderContext {
   void setU32(uint32_t off);
   void pushU64(uint32_t off);
   void setU64(uint32_t off);
+  void pushF(uint32_t n);      ///< f64 fN
+  void setF(uint32_t n);       ///< pops f64 into fN
+  void pushFBits(uint32_t n);  ///< i64 fN.u64
+  void setFBits(uint32_t n);   ///< pops i64 into fN.u64
+  void pushV(uint32_t n);      ///< v128 vN (host order, guest element 0 in the high lanes)
+  void setV(uint32_t n);       ///< pops v128 into vN
+  void simd(uint32_t o) { c.simd(o); }
 
   /// crN = compare(a, b) with so copied from XER, as CRRegister::compare does.
   enum class Cmp { S32, U32, S64, U64 };

@@ -55,6 +55,10 @@ set(CODEGEN_WASM_SOURCES
     wasm/wasm_encoder.cpp
     wasm/wasm_context_layout.cpp
     wasm/wasm_builders.cpp
+    wasm/wasm_builders_fp.cpp
+    wasm/wasm_builders_system.cpp
+    wasm/wasm_builders_vector.cpp
+    wasm/wasm_helpers.cpp
     wasm/wasm_function.cpp
     wasm/wasm_writer.cpp
 )

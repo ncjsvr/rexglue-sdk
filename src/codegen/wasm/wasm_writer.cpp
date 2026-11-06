@@ -74,9 +74,26 @@ ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionN
   env.fnMmioStore32 = mb.importFunction("env", "mmio_store32", tTrap);
   env.fnTimebase = mb.importFunction("env", "timebase", tTimebase);
 
+  // Optional imports (guest-abi.md, v1 additions): only chunks that need them import them.
+  ChunkFeatures features;
+  for (const auto* fn : functions) {
+    const ChunkFeatures f = ScanFeatures(ctx, *fn);
+    features.globalLock |= f.globalLock;
+    features.longjmp |= f.longjmp;
+  }
+  if (features.globalLock)
+    env.fnGlobalLock =
+        mb.importFunction("env", "global_lock", mb.addType({{V::I64, V::I32}, {V::I32}}));
+  if (features.longjmp) {
+    const uint32_t tTag = mb.addType({{V::I32, V::I32}, {}});
+    env.catchType = mb.addType({{}, {V::I32, V::I32}});
+    env.longjmpTag = mb.importTag("env", "longjmp", tTag);
+  }
+
   const uint32_t firstIndex = mb.importedFunctionCount();
   for (size_t i = 0; i < functions.size(); ++i)
     env.localFunctions.emplace(functions[i]->base(), firstIndex + static_cast<uint32_t>(i));
+  AssignHelperIndices(env, firstIndex + static_cast<uint32_t>(functions.size()));
 
   ChunkModule chunk;
   std::vector<uint32_t> elements;
@@ -100,6 +117,7 @@ ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionN
     }
     chunk.functions.push_back(std::move(entry));
   }
+  AddHelperFunctions(mb, env);
   if (!functions.empty())
     mb.addElementSegment(slots.at(functions.front()->base()), std::move(elements));
   chunk.bytes = mb.finish();

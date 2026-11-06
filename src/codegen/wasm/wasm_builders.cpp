@@ -1,10 +1,13 @@
 /**
  * @file        codegen/wasm/wasm_builders.cpp
- * @brief       PowerPC to WebAssembly instruction builders (core integer set, guest ABI v1)
+ * @brief       PowerPC to WebAssembly instruction builders: integer set, loads and stores,
+ *              branches, dispatch (guest ABI v1)
  *
  * Semantics follow ReXGlue's C++ builders in src/codegen/builders (the reference), including
- * their 32-bit XER[CA] and CR0 conventions. Operands are decoded from the instruction word,
- * so simplified mnemonics (li, mr, slwi, clrldi, beq, bdnz, ...) reach the generic builder.
+ * their 32-bit XER[CA] and CR0 conventions. Operands of the integer set are decoded from the
+ * instruction word, so simplified mnemonics (li, mr, slwi, clrldi, beq, bdnz, ...) reach the
+ * generic builder; the floating-point, vector and system builders (wasm_builders_fp.cpp,
+ * _vector.cpp, _system.cpp) are keyed by PPC_INST_* id like instruction_dispatch.cpp.
  *
  * @copyright   Copyright (c) 2026 MCLA-Reborn contributors
  * @license     Not yet licensed: MCLA-Reborn decides before any release (D-009)
@@ -12,6 +15,8 @@
 
 #include "wasm_builders.h"
 
+#include <cstring>
+#include <set>
 #include <unordered_map>
 
 #include <rex/codegen/config.h>
@@ -20,8 +25,10 @@
 #include <rex/memory/utils.h>
 
 #include "../codegen_logging.h"
+#include "wasm_builders_internal.h"
 
 #include <dis-asm.h>
+#include <ppc-inst.h>
 
 namespace rex::codegen::wasm {
 
@@ -149,6 +156,50 @@ void WasmBuilderContext::setU64(uint32_t off) {
   c.mem(Op::I64Store, 3, off);
 }
 
+uint32_t WasmBuilderContext::opnd(size_t i) const {
+  return insn.operands[i];
+}
+
+bool WasmBuilderContext::recordName() const {
+  return insn.opcode && std::strchr(insn.opcode->name, '.') != nullptr;
+}
+
+void WasmBuilderContext::pushF(uint32_t n) {
+  get(kLocalCtx);
+  c.mem(Op::F64Load, 3, L().f[n]);
+}
+
+void WasmBuilderContext::setF(uint32_t n) {
+  set(kF3);
+  get(kLocalCtx);
+  get(kF3);
+  c.mem(Op::F64Store, 3, L().f[n]);
+}
+
+void WasmBuilderContext::pushFBits(uint32_t n) {
+  get(kLocalCtx);
+  c.mem(Op::I64Load, 3, L().f[n]);
+}
+
+void WasmBuilderContext::setFBits(uint32_t n) {
+  set(kL3);
+  get(kLocalCtx);
+  get(kL3);
+  c.mem(Op::I64Store, 3, L().f[n]);
+}
+
+void WasmBuilderContext::pushV(uint32_t n) {
+  get(kLocalCtx);
+  c.simdMem(Simd::V128Load, 4, L().v[n]);
+}
+
+void WasmBuilderContext::setV(uint32_t n) {
+  set(kV7);
+  get(kLocalCtx);
+  get(kV7);
+  c.simdMem(Simd::V128Store, 4, L().v[n]);
+}
+
 void WasmBuilderContext::compare(uint32_t field, Cmp kind, uint32_t a, uint32_t b) {
   uint8_t lt, gt, eq;
   switch (kind) {
@@ -266,11 +317,30 @@ void callFunctionNode(WasmBuilderContext& w, const FunctionNode& node) {
 void WasmBuilderContext::callGuest(uint32_t target) {
   const auto& cfg = config();
   if (target != 0 && target == cfg.setJmpAddress) {
-    unimplemented("setjmp");
+    // builders/context.cpp emit_function_call: env = ctx; r3 = ppc_setjmp(r3); on a longjmp
+    // ctx = env and r3 = the value. The snapshot lives in v128 locals; the longjmp arrives as
+    // an env.longjmp exception caught around the body (wasm_function.cpp).
+    auto site = st.setjmpSites.find(base);
+    if (site == st.setjmpSites.end() || env.longjmpTag == ModuleEnv::kNone ||
+        !hasSegment(site->second)) {
+      unimplemented("setjmp (not a bl)");
+      return;
+    }
+    for (uint32_t i = 0; i < st.snapshotCount; ++i) {
+      get(kLocalCtx), c.simdMem(Simd::V128Load, 4, 16 * i), set(st.localSnapshot + i);
+    }
+    pushR32(3), set(st.localJmpBuf);
+    i32(static_cast<int32_t>(st.segments.at(site->second) + 1)), set(st.localJmpResume);
+    i64(0), setR(3);
     return;
   }
   if (target != 0 && target == cfg.longJmpAddress) {
-    unimplemented("longjmp");
+    // ppc_longjmp(r3.u32, r4.s32): unwinds to the frame that ran setjmp on that buffer.
+    if (env.longjmpTag == ModuleEnv::kNone) {
+      unimplemented("longjmp");
+      return;
+    }
+    pushR32(3), pushR32(4), c.throw_(env.longjmpTag);
     return;
   }
 
@@ -323,7 +393,7 @@ bool WasmBuilderContext::mmioCheckXForm() const {
 
 namespace {
 
-using W = WasmBuilderContext;
+using namespace detail;
 
 //=============================================================================
 // Shared pieces
@@ -979,6 +1049,12 @@ void build_mfspr(W& w) {
     case 9:  // ctr
       w.pushU64(l.ctr), w.setR(w.rD());
       break;
+    case 268:  // tbl (mftb through mfspr)
+      w.c.call(w.env.fnTimebase), w.setR(w.rD());
+      break;
+    case 269:  // tbu
+      w.c.call(w.env.fnTimebase), w.i64(32), w.op(Op::I64ShrU), w.setR(w.rD());
+      break;
     case 1:  // xer: (so << 31) | (ov << 30) | (ca << 29) as an int
       w.pushU8(l.xerSo), w.i32(31), w.op(Op::I32Shl);
       w.pushU8(l.xerOv), w.i32(30), w.op(Op::I32Shl), w.op(Op::I32Or);
@@ -1022,24 +1098,42 @@ void build_mtspr(W& w) {
 // words plain, bytes at ea ^ 3, halfwords at ea ^ 2, doublewords rotated by 32 (ADR-0009).
 //=============================================================================
 
-enum class Width { B, H, W, D };
-
-/// Pushes the effective address (i32). D-form: (rA|0) + d; update forms always use rA.
-void pushEaD(W& w, int32_t disp, bool update) {
-  if (w.rA() != 0 || update)
-    w.pushR32(w.rA()), w.i32(disp), w.op(Op::I32Add);
-  else
-    w.i32(disp);
+/// Pushes i32 (ea in I0 is in the MMIO range 0x7F000000..0x7FFFFFFF).
+void pushIsMmioAddr(W& w) {
+  w.get(kI0), w.i32(0x7F000000), w.op(Op::I32Sub), w.i32(0x01000000), w.op(Op::I32LtU);
 }
 
-void pushEaX(W& w, bool update) {
-  if (w.rA() != 0 || update)
-    w.pushR32(w.rA()), w.pushR32(w.rB()), w.op(Op::I32Add);
-  else
-    w.pushR32(w.rB());
+void mmioLoad(W& w, Width width) {
+  w.get(kLocalCtx), w.get(kI0), w.c.call(w.env.fnMmioLoad32);
+  if (width == Width::B)
+    w.i32(0xFF), w.op(Op::I32And);
+  else if (width == Width::H)
+    w.i32(0xFFFF), w.op(Op::I32And);
+  w.op(Op::I64ExtendI32U);
+  if (width == Width::D) {
+    w.i64(32), w.op(Op::I64Shl);
+    w.get(kLocalCtx), w.get(kI0), w.i32(4), w.op(Op::I32Add), w.c.call(w.env.fnMmioLoad32);
+    w.op(Op::I64ExtendI32U), w.op(Op::I64Or);
+  }
 }
 
-/// Pushes the linear address for an access of `width` at the ea in I0.
+void mmioStore(W& w, Width width, uint32_t value) {
+  if (width == Width::D) {
+    w.get(kLocalCtx), w.get(kI0), w.get(value), w.i64(32), w.op(Op::I64ShrU),
+        w.op(Op::I32WrapI64), w.c.call(w.env.fnMmioStore32);
+    w.get(kLocalCtx), w.get(kI0), w.i32(4), w.op(Op::I32Add), w.get(value),
+        w.op(Op::I32WrapI64), w.c.call(w.env.fnMmioStore32);
+    return;
+  }
+  w.get(kLocalCtx), w.get(kI0), w.get(value);
+  if (width == Width::B)
+    w.i32(0xFF), w.op(Op::I32And);
+  else if (width == Width::H)
+    w.i32(0xFFFF), w.op(Op::I32And);
+  w.c.call(w.env.fnMmioStore32);
+}
+
+/// Pushes the linear address for an aligned access of `width` at the ea in I0.
 void pushLinear(W& w, Width width) {
   w.get(kI0);
   if (width == Width::B)
@@ -1068,57 +1162,81 @@ void plainLoad(W& w, Width width, bool sign) {
   }
 }
 
-void mmioLoad(W& w, Width width) {
-  w.get(kLocalCtx), w.get(kI0), w.c.call(w.env.fnMmioLoad32);
-  if (width == Width::B)
-    w.i32(0xFF), w.op(Op::I32And);
-  else if (width == Width::H)
-    w.i32(0xFFFF), w.op(Op::I32And);
-  w.op(Op::I64ExtendI32U);
-  if (width == Width::D) {
-    w.i64(32), w.op(Op::I64Shl);
-    w.get(kLocalCtx), w.get(kI0), w.i32(4), w.op(Op::I32Add), w.c.call(w.env.fnMmioLoad32);
-    w.op(Op::I64ExtendI32U), w.op(Op::I64Or);
-  }
-}
-
-/// Pushes i32 (ea in I0 is in the MMIO range 0x7F000000..0x7FFFFFFF).
-void pushIsMmioAddr(W& w) {
-  w.get(kI0), w.i32(0x7F000000), w.op(Op::I32Sub), w.i32(0x01000000), w.op(Op::I32LtU);
-}
-
-void plainStore(W& w, Width width, uint32_t rs) {
-  pushLinear(w, width);
+/// Byte-wise load through the module's helpers (misaligned halfword, word or doubleword).
+void slowLoad(W& w, Width width, bool sign) {
+  w.get(kI0);
   switch (width) {
-    case Width::B:
-      w.pushR32(rs), w.c.mem(Op::I32Store8, 0, kGuestBase);
-      break;
     case Width::H:
-      w.pushR32(rs), w.c.mem(Op::I32Store16, 1, kGuestBase);
+      w.c.call(w.env.fnLoad16);
+      if (sign)
+        w.op(Op::I32Extend16S), w.op(Op::I64ExtendI32S);
+      else
+        w.op(Op::I64ExtendI32U);
       break;
     case Width::W:
-      w.pushR32(rs), w.c.mem(Op::I32Store, 2, kGuestBase);
+      w.c.call(w.env.fnLoad32);
+      w.op(sign ? Op::I64ExtendI32S : Op::I64ExtendI32U);
       break;
-    case Width::D:
-      w.pushR(rs), w.i64(32), w.op(Op::I64Rotl), w.c.mem(Op::I64Store, 3, kGuestBase);
+    default:
+      w.c.call(w.env.fnLoad64);
       break;
   }
 }
 
-void mmioStore(W& w, Width width, uint32_t rs) {
-  if (width == Width::D) {
-    w.get(kLocalCtx), w.get(kI0), w.pushR(rs), w.i64(32), w.op(Op::I64ShrU),
-        w.op(Op::I32WrapI64), w.c.call(w.env.fnMmioStore32);
-    w.get(kLocalCtx), w.get(kI0), w.i32(4), w.op(Op::I32Add), w.pushR32(rs),
-        w.c.call(w.env.fnMmioStore32);
+void plainStore(W& w, Width width, uint32_t value) {
+  pushLinear(w, width);
+  w.get(value);
+  switch (width) {
+    case Width::B:
+      w.c.mem(Op::I32Store8, 0, kGuestBase);
+      break;
+    case Width::H:
+      w.c.mem(Op::I32Store16, 1, kGuestBase);
+      break;
+    case Width::W:
+      w.c.mem(Op::I32Store, 2, kGuestBase);
+      break;
+    case Width::D:
+      w.i64(32), w.op(Op::I64Rotl), w.c.mem(Op::I64Store, 3, kGuestBase);
+      break;
+  }
+}
+
+void slowStore(W& w, Width width, uint32_t value) {
+  w.get(kI0), w.get(value);
+  w.c.call(width == Width::H ? w.env.fnStore16
+                             : (width == Width::W ? w.env.fnStore32 : w.env.fnStore64));
+}
+
+/// i32 mask of the address bits that must be clear for the fast path.
+int32_t alignMask(Width width) {
+  return width == Width::H ? 1 : 3;
+}
+
+void plainOrSlowLoad(W& w, Width width, bool sign, bool aligned) {
+  if (aligned || width == Width::B) {
+    plainLoad(w, width, sign);
     return;
   }
-  w.get(kLocalCtx), w.get(kI0), w.pushR32(rs);
-  if (width == Width::B)
-    w.i32(0xFF), w.op(Op::I32And);
-  else if (width == Width::H)
-    w.i32(0xFFFF), w.op(Op::I32And);
-  w.c.call(w.env.fnMmioStore32);
+  w.get(kI0), w.i32(alignMask(width)), w.op(Op::I32And), w.op(Op::I32Eqz);
+  w.beginIf(kI64Block);
+  plainLoad(w, width, sign);
+  w.beginElse();
+  slowLoad(w, width, sign);
+  w.end();
+}
+
+void plainOrSlowStore(W& w, Width width, uint32_t value, bool aligned) {
+  if (aligned || width == Width::B) {
+    plainStore(w, width, value);
+    return;
+  }
+  w.get(kI0), w.i32(alignMask(width)), w.op(Op::I32And), w.op(Op::I32Eqz);
+  w.beginIf();
+  plainStore(w, width, value);
+  w.beginElse();
+  slowStore(w, width, value);
+  w.end();
 }
 
 struct Access {
@@ -1134,16 +1252,7 @@ void emitLoad(W& w, const Access& a) {
   a.indexed ? pushEaX(w, a.update) : pushEaD(w, a.disp, a.update);
   w.set(kI0);
   const bool mmio = a.checkMmio && (a.indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
-  if (mmio) {
-    pushIsMmioAddr(w);
-    w.beginIf(kI64Block);
-    mmioLoad(w, a.width);
-    w.beginElse();
-    plainLoad(w, a.width, a.sign);
-    w.end();
-  } else {
-    plainLoad(w, a.width, a.sign);
-  }
+  loadValue(w, a.width, a.sign, mmio, provablyAligned(w, a.width, a.indexed, a.update, a.disp));
   w.setR(w.rD());
   if (a.update)
     w.get(kI0), w.setR32(w.rA());
@@ -1153,16 +1262,15 @@ void emitStore(W& w, const Access& a) {
   a.indexed ? pushEaX(w, a.update) : pushEaD(w, a.disp, a.update);
   w.set(kI0);
   const bool mmio = a.checkMmio && (a.indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
-  if (mmio) {
-    pushIsMmioAddr(w);
-    w.beginIf();
-    mmioStore(w, a.width, w.rS());
-    w.beginElse();
-    plainStore(w, a.width, w.rS());
-    w.end();
+  uint32_t value;
+  if (a.width == Width::D) {
+    w.pushR(w.rS()), w.set(kL4);
+    value = kL4;
   } else {
-    plainStore(w, a.width, w.rS());
+    w.pushR32(w.rS()), w.set(kI4);
+    value = kI4;
   }
+  storeValue(w, a.width, value, mmio, provablyAligned(w, a.width, a.indexed, a.update, a.disp));
   if (a.update)
     w.get(kI0), w.setR32(w.rA());
 }
@@ -1354,9 +1462,35 @@ void build_bclr(W& w) {
     w.end();
 }
 
-void emitJumpTable(W& w, const JumpTable& jt) {
+/// Jumps to one jump-table target (an internal label, or a tail call to a function).
+void gotoJumpTarget(W& w, uint32_t target) {
+  if (target == 0) {
+    w.trap(kBadJumpTable, w.base);
+    return;
+  }
+  const TargetKind kind = w.graph().classifyTarget(target, w.base, false);
+  if (isInternal(w, target, kind)) {
+    w.branchTo(target);
+  } else if (kind == TargetKind::Function || kind == TargetKind::Import) {
+    if (const FunctionNode* node = w.graph().getFunction(target);
+        node && node->authority() != FunctionAuthority::IMPORT) {
+      callFunctionNode(w, *node);
+      w.ret();
+    } else {
+      w.trap(kUnresolvedCall, w.base);
+    }
+  } else {
+    REXCODEGEN_ERROR("wasm: jump target 0x{:08X} unresolved at bctr 0x{:08X}", target, w.base);
+    w.trap(kUnresolvedCall, w.base);
+  }
+}
+
+/// br_table on the index register, one block per case. With `checkCtr`, each case first
+/// confirms that ctr holds its target and otherwise leaves the outer block.
+void emitIndexSwitch(W& w, const JumpTable& jt, bool checkCtr) {
   const uint32_t m = static_cast<uint32_t>(jt.targets.size());
-  w.beginBlock();  // default
+  w.beginBlock();  // index out of range (or ctr mismatch) lands after this block
+  const uint32_t outerDepth = w.st.depth;
   for (uint32_t i = 0; i < m; ++i)
     w.beginBlock();
   w.pushR32(jt.indexRegister);
@@ -1367,27 +1501,33 @@ void emitJumpTable(W& w, const JumpTable& jt) {
   for (uint32_t i = 0; i < m; ++i) {
     w.end();  // case i starts here
     const uint32_t target = jt.targets[i];
-    if (target == 0) {
-      w.trap(kBadJumpTable, w.base);
-      continue;
+    if (checkCtr && target != 0) {
+      w.pushU32(w.L().ctr), w.i32(static_cast<int32_t>(target)), w.op(Op::I32Ne);
+      w.c.brIf(w.st.depth - outerDepth);
     }
-    const TargetKind kind = w.graph().classifyTarget(target, w.base, false);
-    if (isInternal(w, target, kind)) {
-      w.branchTo(target);
-    } else if (kind == TargetKind::Function || kind == TargetKind::Import) {
-      if (const FunctionNode* node = w.graph().getFunction(target);
-          node && node->authority() != FunctionAuthority::IMPORT) {
-        callFunctionNode(w, *node);
-        w.ret();
-      } else {
-        w.trap(kUnresolvedCall, w.base);
-      }
-    } else {
-      REXCODEGEN_ERROR("wasm: jump target 0x{:08X} unresolved at bctr 0x{:08X}", target, w.base);
-      w.trap(kUnresolvedCall, w.base);
-    }
+    gotoJumpTarget(w, target);
   }
-  w.end();  // default: index out of range
+  w.end();
+}
+
+/// Jump table at a bctr. ctr holds the address loaded from the table, which is the target
+/// for every table type, so the dispatch keys on ctr and doesn't depend on the index
+/// register surviving until the bctr (code may reuse it for the scaled offset, e.g.
+/// `slwi r12,r12,2; lwzx r12,r11,r12; mtctr r12; bctr`). Fast path: br_table on the index
+/// register, confirmed against ctr. Otherwise ctr is matched against each distinct target,
+/// then the plain index switch (ReXGlue's C++ behaviour) is the last resort.
+void emitJumpTable(W& w, const JumpTable& jt) {
+  emitIndexSwitch(w, jt, true);
+  std::set<uint32_t> seen;
+  for (uint32_t target : jt.targets) {
+    if (target == 0 || !seen.insert(target).second)
+      continue;
+    w.pushU32(w.L().ctr), w.i32(static_cast<int32_t>(target)), w.op(Op::I32Eq);
+    w.beginIf();
+    gotoJumpTarget(w, target);
+    w.end();
+  }
+  emitIndexSwitch(w, jt, false);
   w.trap(kBadJumpTable, w.base);
 }
 
@@ -1559,7 +1699,77 @@ const std::unordered_map<uint32_t, Builder>& Table() {
   return table;
 }
 
+const IdTable& Ids() {
+  static const IdTable table = [] {
+    IdTable t;
+    RegisterFloatBuilders(t);
+    RegisterVectorBuilders(t);
+    RegisterSystemBuilders(t);
+    return t;
+  }();
+  return table;
+}
+
 }  // namespace
+
+namespace detail {
+
+void pushEaD(W& w, int32_t disp, bool update) {
+  if (w.rA() != 0 || update)
+    w.pushR32(w.rA()), w.i32(disp), w.op(Op::I32Add);
+  else
+    w.i32(disp);
+}
+
+void pushEaX(W& w, bool update) {
+  if (w.rA() != 0 || update)
+    w.pushR32(w.rA()), w.pushR32(w.rB()), w.op(Op::I32Add);
+  else
+    w.pushR32(w.rB());
+}
+
+bool provablyAligned(const W& w, Width width, bool indexed, bool update, int32_t disp) {
+  if (width == Width::B)
+    return true;
+  if (indexed || (disp & alignMask(width)) != 0)
+    return false;
+  if (w.rA() == 0 && !update)
+    return true;  // absolute address
+  return w.rA() == 1;
+}
+
+void loadValue(W& w, Width width, bool sign, bool mmio, bool aligned) {
+  if (!mmio) {
+    plainOrSlowLoad(w, width, sign, aligned);
+    return;
+  }
+  pushIsMmioAddr(w);
+  w.beginIf(kI64Block);
+  mmioLoad(w, width);
+  w.beginElse();
+  plainOrSlowLoad(w, width, sign, aligned);
+  w.end();
+}
+
+void storeValue(W& w, Width width, uint32_t valueLocal, bool mmio, bool aligned) {
+  if (!mmio) {
+    plainOrSlowStore(w, width, valueLocal, aligned);
+    return;
+  }
+  pushIsMmioAddr(w);
+  w.beginIf();
+  mmioStore(w, width, valueLocal);
+  w.beginElse();
+  plainOrSlowStore(w, width, valueLocal, aligned);
+  w.end();
+}
+
+void pushGuestLinear(W& w, uint32_t local) {
+  w.get(local), w.op(Op::I64ExtendI32U), w.i64(static_cast<int64_t>(kGuestBase)),
+      w.op(Op::I64Add);
+}
+
+}  // namespace detail
 
 bool DispatchWasmInstruction(WasmBuilderContext& ctx) {
   const uint32_t opcd = ctx.word >> 26;
@@ -1567,8 +1777,21 @@ bool DispatchWasmInstruction(WasmBuilderContext& ctx) {
   if (opcd == 19 || opcd == 31)
     key = Key(opcd, (ctx.word >> 1) & 0x3FF);
   const auto& table = Table();
-  auto it = table.find(key);
-  if (it == table.end())
+  if (auto it = table.find(key); it != table.end()) {
+    it->second(ctx);
+    return true;
+  }
+  if (!ctx.insn.opcode)
+    return false;
+  int id = ctx.insn.opcode->id;
+  // VUPKHSB128/VUPKLSB128 misidentification fixup (instruction_dispatch.cpp).
+  if (id == PPC_INST_VUPKHSB128 && ctx.insn.operands[2] == 0x60)
+    id = PPC_INST_VUPKHSH128;
+  else if (id == PPC_INST_VUPKLSB128 && ctx.insn.operands[2] == 0x60)
+    id = PPC_INST_VUPKLSH128;
+  const auto& ids = Ids();
+  auto it = ids.find(id);
+  if (it == ids.end())
     return false;
   it->second(ctx);
   return true;

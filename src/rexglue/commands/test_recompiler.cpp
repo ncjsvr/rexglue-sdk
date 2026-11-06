@@ -526,6 +526,14 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
     codegen::RecompilerConfig config;
     config.outDirectoryPath = std::string(outDir);
     config.backend = "wasm";
+    // Fixtures name their setjmp/longjmp stand-ins test_setjmp / test_longjmp; calls to them
+    // take the setjmp_address / longjmp_address path.
+    for (const auto& [addr, name] : symbols) {
+      if (name == "test_setjmp")
+        config.setJmpAddress = static_cast<uint32_t>(addr);
+      else if (name == "test_longjmp")
+        config.longJmpAddress = static_cast<uint32_t>(addr);
+    }
     auto ctx =
         codegen::CodegenContext::Create(codegen::BinaryView::fromModule(module), std::move(config));
     codegen::AnalyzeTestBinary(ctx, stem, symbols, kTestBaseAddress, fileData.data(),

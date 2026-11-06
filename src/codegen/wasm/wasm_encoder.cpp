@@ -9,6 +9,7 @@
 #include "wasm_encoder.h"
 
 #include <algorithm>
+#include <bit>
 
 namespace rex::codegen::wasm {
 
@@ -16,7 +17,7 @@ namespace {
 
 constexpr uint8_t kSectionCustom = 0, kSectionType = 1, kSectionImport = 2, kSectionFunction = 3,
                   kSectionExport = 7, kSectionElement = 9, kSectionCode = 10;
-constexpr uint8_t kExternFunc = 0x00, kExternTable = 0x01, kExternMemory = 0x02;
+constexpr uint8_t kExternFunc = 0x00, kExternTable = 0x01, kExternMemory = 0x02, kExternTag = 0x04;
 
 void writeSection(Bytes& out, uint8_t id, const Bytes& content) {
   out.u8(id);
@@ -69,6 +70,44 @@ void Bytes::appendSized(const Bytes& other) {
   append(other);
 }
 
+void Code::f32Const(float v) {
+  u8(Op::F32Const);
+  u32le(std::bit_cast<uint32_t>(v));
+}
+
+void Code::f64Const(double v) {
+  u8(Op::F64Const);
+  const uint64_t bits = std::bit_cast<uint64_t>(v);
+  u32le(static_cast<uint32_t>(bits));
+  u32le(static_cast<uint32_t>(bits >> 32));
+}
+
+void Code::v128Const(const uint8_t (&bytes)[16]) {
+  simd(Simd::V128Const);
+  for (uint8_t b : bytes)
+    u8(b);
+}
+
+void Code::i32x4Const(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+  simd(Simd::V128Const);
+  u32le(a);
+  u32le(b);
+  u32le(c);
+  u32le(d);
+}
+
+void Code::i8x16Splat(uint8_t v) {
+  simd(Simd::V128Const);
+  for (int i = 0; i < 16; ++i)
+    u8(v);
+}
+
+void Code::shuffle(const uint8_t (&lanes)[16]) {
+  simd(Simd::I8x16Shuffle);
+  for (uint8_t b : lanes)
+    u8(b);
+}
+
 void Code::brTable(const std::vector<uint32_t>& depths, uint32_t defaultDepth) {
   u8(Op::BrTable);
   uleb(depths.size());
@@ -119,6 +158,17 @@ void ModuleBuilder::importTable(std::string_view module, std::string_view field,
   imports_.u8(0x00);  // limits: min only, i32 index
   imports_.uleb(minSize);
   ++importCount_;
+}
+
+uint32_t ModuleBuilder::importTag(std::string_view module, std::string_view field,
+                                  uint32_t typeIndex) {
+  imports_.name(module);
+  imports_.name(field);
+  imports_.u8(kExternTag);
+  imports_.u8(0x00);  // attribute: exception
+  imports_.uleb(typeIndex);
+  ++importCount_;
+  return importedTags_++;
 }
 
 uint32_t ModuleBuilder::addFunction(uint32_t typeIndex, std::vector<LocalDecl> locals, Code body,

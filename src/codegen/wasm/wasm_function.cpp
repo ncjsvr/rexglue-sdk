@@ -6,6 +6,11 @@
  * block start (branch target, jump-table target, block base) is one case; falling off a case
  * runs into the next, a branch sets the label and continues the loop, blr returns.
  *
+ * Functions that call the configured setjmp_address wrap that loop in a try_table catching
+ * env.longjmp (ReXGlue's ppc_setjmp/ppc_longjmp): the catch restores the context snapshot
+ * taken at the setjmp, sets r3 to the longjmp value and re-enters the loop at the case after
+ * the setjmp call.
+ *
  * @copyright   Copyright (c) 2026 MCLA-Reborn contributors
  * @license     Not yet licensed: MCLA-Reborn decides before any release (D-009)
  */
@@ -40,7 +45,8 @@ nlohmann::json TrapCodesJson() {
           {"unknown_target", kUnknownTarget},
           {"unimplemented", kUnimplemented},
           {"unresolved_call", kUnresolvedCall},
-          {"bad_jump_table", kBadJumpTable}};
+          {"bad_jump_table", kBadJumpTable},
+          {"system_call", kSystemCall}};
 }
 
 uint32_t ImportRegistry::idFor(const std::string& importName, const EmitContext& ctx) {
@@ -114,10 +120,39 @@ bool looksLikeSwitch(const uint32_t* data, uint32_t addr, uint32_t fnBase) {
 }  // namespace
 }  // namespace wasm
 
+namespace wasm {
+
+ChunkFeatures ScanFeatures(const EmitContext& ctx, const FunctionNode& fn) {
+  ChunkFeatures f;
+  const auto& cfg = ctx.config;
+  for (const auto& block : fn.blocks()) {
+    const auto* data = reinterpret_cast<const uint32_t*>(ctx.binary.translate(block.base));
+    if (!data)
+      continue;
+    for (uint32_t addr = block.base; addr < block.end(); addr += 4, ++data) {
+      const uint32_t word = load_and_swap<uint32_t>(data);
+      const uint32_t opcd = word >> 26;
+      if (opcd == 31 && !cfg.skipMsr) {
+        const uint32_t xo = (word >> 1) & 0x3FF;
+        if (xo == 83 || xo == 146 || xo == 178)  // mfmsr, mtmsr, mtmsrd
+          f.globalLock = true;
+      }
+      if (opcd == 16 || opcd == 18) {
+        const uint32_t target = branchTarget(addr, word);
+        if (target != 0 && (target == cfg.setJmpAddress || target == cfg.longJmpAddress))
+          f.longjmp = true;
+      }
+    }
+  }
+  return f;
+}
+
+}  // namespace wasm
+
 bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
                             wasm::FunctionOutput& out) const {
   using namespace wasm;
-  out.locals = {{5, ValType::I32}, {4, ValType::I64}};
+  out.locals = FixedLocals();
   if (authority() == FunctionAuthority::IMPORT)
     return false;
   if (blocks().empty()) {
@@ -145,6 +180,12 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
         const uint32_t target = branchTarget(addr, word);
         if (!(word & 1) || (target >= base() && target < end()))
           labels.insert(target);
+        // bl setjmp: the next instruction is where a longjmp resumes.
+        if (opcd == 18 && (word & 1) && target != 0 && target == ctx.config.setJmpAddress &&
+            env.longjmpTag != ModuleEnv::kNone) {
+          st.setjmpSites.emplace(addr, addr + 4);
+          labels.insert(addr + 4);
+        }
       }
       if (auto st_it = ctx.config.switchTables.find(addr); st_it != ctx.config.switchTables.end()) {
         labels.insert(st_it->second.targets.begin(), st_it->second.targets.end());
@@ -169,11 +210,30 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
   if (caseCount == 0)
     return true;
 
+  // --- setjmp state: buffer, resume case, caught buffer and value, context snapshot ---
+  const bool hasSetjmp = !st.setjmpSites.empty();
+  uint32_t localCaughtBuf = 0, localCaughtValue = 0;
+  if (hasSetjmp) {
+    st.localJmpBuf = kFirstExtraLocal;
+    st.localJmpResume = kFirstExtraLocal + 1;
+    localCaughtBuf = kFirstExtraLocal + 2;
+    localCaughtValue = kFirstExtraLocal + 3;
+    st.localSnapshot = kFirstExtraLocal + 4;
+    st.snapshotCount = (env.layout.size + 15) / 16;
+    out.locals.push_back({4, ValType::I32});
+    out.locals.push_back({st.snapshotCount, ValType::V128});
+  }
+
   // --- Dispatch prologue ---
   Code& c = out.body;
   if (auto it = st.segments.find(base()); it != st.segments.end() && it->second != 0) {
     c.i32Const(static_cast<int32_t>(it->second));
     c.localSet(kLocalLabel);
+  }
+  if (hasSetjmp) {
+    c.loop();                         // restart after a caught longjmp
+    c.blockTyped(env.catchType);      // [] -> [i32 buf, i32 value]
+    c.tryTableCatch(env.longjmpTag, 0);
   }
   c.loop();
   for (uint32_t i = 0; i < caseCount; ++i)
@@ -228,6 +288,46 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
 
   assert(st.depth == 0 && "unbalanced case blocks");
   c.end();  // loop: falling off the last case returns
+
+  if (hasSetjmp) {
+    c.end();  // try_table
+    c.op(Op::Return);
+    c.end();  // catch block: stack = buf, value
+    c.localSet(localCaughtValue);
+    c.localSet(localCaughtBuf);
+    // A setjmp in this frame ran on this buffer: ctx = env; r3 = value ? value : 1.
+    c.localGet(st.localJmpResume);
+    c.i32Const(0);
+    c.op(Op::I32Ne);
+    c.localGet(localCaughtBuf);
+    c.localGet(st.localJmpBuf);
+    c.op(Op::I32Eq);
+    c.op(Op::I32And);
+    c.if_();
+    for (uint32_t i = 0; i < st.snapshotCount; ++i) {
+      c.localGet(kLocalCtx);
+      c.localGet(st.localSnapshot + i);
+      c.simdMem(Simd::V128Store, 4, 16 * i);
+    }
+    c.localGet(kLocalCtx);
+    c.localGet(localCaughtValue);
+    c.i32Const(1);
+    c.localGet(localCaughtValue);
+    c.op(Op::Select);
+    c.op(Op::I64ExtendI32S);
+    c.mem(Op::I64Store, 3, env.layout.r[3]);
+    c.localGet(st.localJmpResume);
+    c.i32Const(1);
+    c.op(Op::I32Sub);
+    c.localSet(kLocalLabel);
+    c.br(1);  // restart loop
+    c.end();
+    // Not ours: keep unwinding.
+    c.localGet(localCaughtBuf);
+    c.localGet(localCaughtValue);
+    c.throw_(env.longjmpTag);
+    c.end();  // restart loop
+  }
   return true;
 }
 
