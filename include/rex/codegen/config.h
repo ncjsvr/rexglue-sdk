@@ -101,6 +101,10 @@ struct RecompilerConfig {
   // === Backend selection ===
   std::string backend = "cpp";  ///< "cpp" (C++ sources) or "wasm" (chunk modules + manifest.json)
   uint32_t wasmChunkRange = 0;  ///< wasm: guest bytes per chunk module, 0 = one chunk
+  /// wasm: how accesses that may use the 0xC0000000/0xE0000000 physical views are folded onto
+  /// the canonical 0xA0000000 range (MCLA-Reborn D-080, T-050): "branch" (default), "select"
+  /// (branchless) or "none" (no folding; for measurements only, wrong for real titles).
+  std::string wasmAliasFold = "branch";
 
   // === Analysis tuning (optional) ===
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets

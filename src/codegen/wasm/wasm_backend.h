@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -34,6 +35,34 @@ constexpr uint64_t kPageSize = 0x10000ull;
 constexpr uint64_t kMinMemoryPages = (kGuestBase + 0x100000000ull) / kPageSize;
 /// Upper bound declared on the imported memory (16 GiB, V8's memory64 limit).
 constexpr uint64_t kMaxMemoryPages = 0x400000000ull / kPageSize;
+
+/// Physical alias views (MCLA-Reborn D-080, T-050). The Xbox 360 maps its 512 MiB of physical
+/// memory three times: 0xA0000000-0xBFFFFFFF (64 KiB pages), 0xC0000000-0xDFFFFFFF (16 MiB
+/// pages) and 0xE0000000-0xFFFFFFFF (4 KiB pages, where guest 0xE0000000 is physical 0x1000, as
+/// ReXGlue's PhysicalHeap defines it). A linear memory can't map a page twice, so the bytes of
+/// physical address p live once, at guest address 0xA0000000 + p (the canonical range), and
+/// accesses through the other two views are folded onto it. Below 0xC0000000 nothing changes.
+constexpr uint32_t kAliasFoldStart = 0xC0000000u;
+constexpr uint32_t kCanonicalPhysicalBase = 0xA0000000u;
+/// The canonical guest address of `ga`: itself below 0xC0000000, else the 0xA0000000-view
+/// address of the same physical byte (bit 29 tells the 0xE view, +0x1000, from the 0xC view).
+constexpr uint32_t CanonicalGuestAddress(uint32_t ga) {
+  return ga < kAliasFoldStart ? ga
+                              : ((ga & 0x1FFFFFFFu) | kCanonicalPhysicalBase) + ((ga >> 17) & 0x1000u);
+}
+static_assert(CanonicalGuestAddress(0xC0001234u) == 0xA0001234u);
+static_assert(CanonicalGuestAddress(0xE0000000u) == 0xA0001000u);
+static_assert(CanonicalGuestAddress(0xE870F000u) == 0xA8710000u);
+static_assert(CanonicalGuestAddress(0xBFFFFFFFu) == 0xBFFFFFFFu);
+
+/// Counts of guest memory accesses by how the alias fold treated them, over every translation
+/// in this process (for the translation summary; not part of the output).
+struct AliasFoldStats {
+  std::atomic<uint64_t> plain{0};     ///< provably below 0xC0000000: base + ga
+  std::atomic<uint64_t> checked{0};   ///< folded at run time when at or above 0xC0000000
+  std::atomic<uint64_t> constant{0};  ///< constant address folded at translation time
+};
+AliasFoldStats& GetAliasFoldStats();
 
 /// Titles whose code may only ever go through the wasm backend (MCLA-Reborn D-006: no C++
 /// recompile of the game may exist). `titleId` is 8 upper-case hex digits.

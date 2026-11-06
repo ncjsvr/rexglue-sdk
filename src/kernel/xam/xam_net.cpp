@@ -14,8 +14,9 @@
 
 #include <cstring>
 
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__EMSCRIPTEN__)
 #include <sys/select.h>
+#include <sys/time.h>
 #endif
 
 #include <rex/chrono/clock.h>

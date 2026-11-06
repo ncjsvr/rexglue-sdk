@@ -31,6 +31,7 @@
 #include "../codegen_logging.h"
 #include "../ppc/disasm.h"
 #include "wasm_builders.h"
+#include "wasm_builders_internal.h"
 
 #if REXGLUE_TRANSLATOR_PPC
 #include <translator_ppc/binutils_compat.h>  // MCLA-Reborn: our decoder (T-048)
@@ -286,6 +287,7 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
       if (st.segments.count(addr)) {
         c.end();  // the next case starts here
         --st.depth;
+        detail::ResetRegisterKnowledge(st);  // reachable from elsewhere: registers unknown
       }
 
       const JumpTable* activeJt = nullptr;
@@ -304,6 +306,7 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
         w.unimplemented("mid-asm hook");
       if (!DispatchWasmInstruction(w))
         w.unimplemented(insn.opcode->name);
+      detail::TrackRegisterWrites(st, word);
     }
   }
 

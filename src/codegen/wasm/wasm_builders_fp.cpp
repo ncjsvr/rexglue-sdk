@@ -35,61 +35,69 @@ namespace {
 
 enum class FpForm { D, DU, X, XU };
 
-/// Computes the ea into kI0 and returns whether alignment is proven.
-bool fpEa(W& w, FpForm form) {
+/// Computes the ea into kI0 (folded onto the canonical physical range when needed, T-050) and
+/// returns whether alignment is proven. `folded` tells fpUpdate where the unfolded ea is.
+bool fpEa(W& w, FpForm form, bool& folded) {
   const bool indexed = form == FpForm::X || form == FpForm::XU;
   const bool update = form == FpForm::DU || form == FpForm::XU;
   indexed ? pushEaX(w, update) : pushEaD(w, w.simm(), update);
   w.set(kI0);
+  folded = indexed ? foldEaX(w, kI0, w.rA(), w.rB(), update)
+                   : foldEaD(w, kI0, w.rA(), w.simm(), update);
   return provablyAligned(w, Width::W, indexed, update, indexed ? 0 : w.simm());
 }
 
-void fpUpdate(W& w, FpForm form) {
+void fpUpdate(W& w, FpForm form, bool folded) {
   if (form == FpForm::DU || form == FpForm::XU)
-    w.get(kI0), w.setR32(w.rA());
+    w.get(unfoldedEa(folded)), w.setR32(w.rA());
 }
 
 template <FpForm Form>
 void build_lfs(W& w) {
-  const bool aligned = fpEa(w, Form);
+  bool folded;
+  const bool aligned = fpEa(w, Form, folded);
   loadValue(w, Width::W, false, false, aligned);
   w.op(Op::I32WrapI64), w.op(Op::F32ReinterpretI32), w.op(Op::F64PromoteF32);
   w.setF(w.rD());
-  fpUpdate(w, Form);
+  fpUpdate(w, Form, folded);
 }
 
 template <FpForm Form>
 void build_lfd(W& w) {
-  const bool aligned = fpEa(w, Form);
+  bool folded;
+  const bool aligned = fpEa(w, Form, folded);
   loadValue(w, Width::D, false, false, aligned);
   w.setFBits(w.rD());
-  fpUpdate(w, Form);
+  fpUpdate(w, Form, folded);
 }
 
 /// MMIO checks as memory.cpp: stfs/stfsx/stfsux/stfd/stfdx/stfiwx check, stfsu/stfdu/stfdux
 /// don't.
 template <FpForm Form, bool Mmio>
 void build_stfs(W& w) {
-  const bool aligned = fpEa(w, Form);
+  bool folded;
+  const bool aligned = fpEa(w, Form, folded);
   w.pushF(w.rS()), w.op(Op::F32DemoteF64), w.op(Op::I32ReinterpretF32), w.set(kI4);
   const bool indexed = Form == FpForm::X || Form == FpForm::XU;
   const bool mmio = Mmio && (indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
   storeValue(w, Width::W, kI4, mmio, aligned);
-  fpUpdate(w, Form);
+  fpUpdate(w, Form, folded);
 }
 
 template <FpForm Form, bool Mmio>
 void build_stfd(W& w) {
-  const bool aligned = fpEa(w, Form);
+  bool folded;
+  const bool aligned = fpEa(w, Form, folded);
   w.pushFBits(w.rS()), w.set(kL4);
   const bool indexed = Form == FpForm::X || Form == FpForm::XU;
   const bool mmio = Mmio && (indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
   storeValue(w, Width::D, kL4, mmio, aligned);
-  fpUpdate(w, Form);
+  fpUpdate(w, Form, folded);
 }
 
 void build_stfiwx(W& w) {
-  const bool aligned = fpEa(w, FpForm::X);
+  bool folded;
+  const bool aligned = fpEa(w, FpForm::X, folded);
   w.pushFBits(w.rS()), w.op(Op::I32WrapI64), w.set(kI4);
   storeValue(w, Width::W, kI4, w.mmioCheckXForm(), aligned);
 }

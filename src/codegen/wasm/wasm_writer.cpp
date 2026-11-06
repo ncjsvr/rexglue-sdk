@@ -241,6 +241,11 @@ bool WasmWriter::write(bool force) {
 
   REXLOG_INFO("wasm backend: {} functions in {} chunk(s), {} with unimplemented instructions",
               functions.size(), translation.chunks.size(), unimplementedFunctions);
+  const auto& folds = GetAliasFoldStats();
+  REXLOG_INFO("wasm backend: alias fold ({}): {} accesses checked at run time, {} constant "
+              "addresses folded, {} provably below 0xC0000000",
+              config.wasmAliasFold, folds.checked.load(), folds.constant.load(),
+              folds.plain.load());
   return true;
 }
 

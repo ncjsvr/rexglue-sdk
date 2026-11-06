@@ -486,7 +486,8 @@ std::vector<uint8_t> ReadBinaryFile(const fs::path& path) {
  * table slot space), every function exported by name, plus tests.json with the fixtures'
  * REGISTER/MEMORY annotations for translator/tests/run-fixtures.mjs.
  */
-bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
+bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::string_view outDir,
+                        std::string_view aliasFold = "branch") {
   namespace wasm = codegen::wasm;
   std::array<ui::KeyValueRow, 4> header_rows = {{
       {"Backend", "wasm"},
@@ -532,6 +533,7 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
     codegen::RecompilerConfig config;
     config.outDirectoryPath = std::string(outDir);
     config.backend = "wasm";
+    config.wasmAliasFold = std::string(aliasFold);
     // Fixtures name their setjmp/longjmp stand-ins test_setjmp / test_longjmp; calls to them
     // take the setjmp_address / longjmp_address path.
     for (const auto& [addr, name] : symbols) {
@@ -624,6 +626,7 @@ struct RecompileTestsArgs {
   std::string asm_dir;
   std::string output;
   std::string backend = "cpp";
+  std::string alias_fold = "branch";
 };
 
 }  // namespace
@@ -651,10 +654,14 @@ void RegisterRecompileTests(CLI::App& parent, const CliContext& ctx, DeferredAct
                   "cpp: Catch2 sources (default); wasm: one module per fixture plus "
                   "manifest.json and tests.json")
       ->check(CLI::IsMember({"cpp", "wasm"}));
+  sub->add_option("--alias-fold", args->alias_fold,
+                  "wasm: physical alias view folding (branch, select, none; T-050)")
+      ->check(CLI::IsMember({"branch", "select", "none"}));
   sub->callback([args, &pending]() {
     pending = [args]() -> rex::Result<void> {
       const bool ok = args->backend == "wasm"
-                          ? RecompileTestsWasm(args->bin_dir, args->asm_dir, args->output)
+                          ? RecompileTestsWasm(args->bin_dir, args->asm_dir, args->output,
+                                               args->alias_fold)
                           : RecompileTests(args->bin_dir, args->asm_dir, args->output);
       if (!ok) {
         return Err<void>(rex::ErrorCategory::Validation, "Test recompilation failed");

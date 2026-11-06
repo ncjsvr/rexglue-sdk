@@ -22,9 +22,11 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/xthread.h>
 
+#if !REXGLUE_WASM_RUNTIME  // MCLA-Reborn: the browser build has no FFmpeg (silent XMA frames)
 extern "C" {
 #include "libavutil/log.h"
 }  // extern "C"
+#endif
 
 REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debug and above)");
 
@@ -59,6 +61,7 @@ XmaDecoder::XmaDecoder(runtime::FunctionDispatcher* function_dispatcher)
 
 XmaDecoder::~XmaDecoder() = default;
 
+#if !REXGLUE_WASM_RUNTIME
 void av_log_callback(void* avcl, int level, const char* fmt, va_list va) {
   if (!REXCVAR_GET(ffmpeg_verbose) && level > AV_LOG_WARNING) {
     return;
@@ -86,9 +89,13 @@ void av_log_callback(void* avcl, int level, const char* fmt, va_list va) {
   }
 }
 
+#endif  // !REXGLUE_WASM_RUNTIME
+
 X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
+#if !REXGLUE_WASM_RUNTIME
   // Setup ffmpeg logging callback
   av_log_set_callback(av_log_callback);
+#endif
 
   // Register APU/XMA MMIO handlers
   // XMA registers are at 0x7FEA0000-0x7FEAFFFF

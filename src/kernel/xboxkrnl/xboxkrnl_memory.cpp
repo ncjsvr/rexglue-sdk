@@ -454,10 +454,22 @@ void MmSetAddressProtect_entry(mapped_void base_address, u32 region_size, u32 pr
 }
 
 u32 MmQueryAllocationSize_entry(mapped_void base_address) {
-  auto heap = REX_KERNEL_MEMORY()->LookupHeap(base_address.guest_address());
+  const uint32_t address = base_address.guest_address();
+  auto heap = REX_KERNEL_MEMORY()->LookupHeap(address);
   uint32_t size;
-  if (!heap->QuerySize(base_address.guest_address(), &size)) {
+  if (!heap->QuerySize(address, &size)) {
     size = 0;
+  }
+  // MCLA-Reborn (T-050): for an address inside an allocation, return the bytes from that
+  // address's page to the end of the allocation, not the whole allocation. MCLA queries the
+  // middle of a 0xE60000-byte block (0xE7FDF000 in 0xE78AF000) and clears that many bytes from
+  // there; the whole size overran the block by exactly the offset (1,840 pages) into the next
+  // physical allocation. For the base address the result is unchanged.
+  memory::HeapAllocationInfo info;
+  if (size && heap->QueryRegionInfo(address, &info) && info.allocation_base &&
+      address > info.allocation_base) {
+    const uint32_t offset = (address - info.allocation_base) & ~(heap->page_size() - 1);
+    size = offset < size ? size - offset : 0;
   }
 
   return size;

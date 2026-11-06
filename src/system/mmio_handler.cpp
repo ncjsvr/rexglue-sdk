@@ -358,6 +358,10 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p, DecodedLoadStore& decoded
 
   return true;
 
+#elif REX_ARCH_WASM64
+  // MCLA-Reborn (browser runtime): wasm has no access faults to decode; translated code reaches
+  // MMIO through explicit env.mmio_load32/mmio_store32 calls (CheckLoad/CheckStore).
+  return false;
 #else
 #error TryDecodeLoadStore not implemented for the target CPU architecture.
   return false;
@@ -474,6 +478,8 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
       assert_true(value_reg == DecodedLoadStore::kArm64ValueRegZero);
       // Register write is ignored for X31.
     }
+#elif REX_ARCH_WASM64
+    (void)value;  // unreachable: TryDecodeLoadStore never succeeds on wasm
 #else
 #error Register value writing not implemented for the target CPU architecture.
 #endif  // REX_ARCH
@@ -496,6 +502,8 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
         assert_true(value_reg == DecodedLoadStore::kArm64ValueRegZero);
         value = 0;
       }
+#elif REX_ARCH_WASM64
+      value = 0;  // unreachable: TryDecodeLoadStore never succeeds on wasm
 #else
 #error Register value reading not implemented for the target CPU architecture.
 #endif  // REX_ARCH

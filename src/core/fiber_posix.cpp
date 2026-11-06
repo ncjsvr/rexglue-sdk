@@ -22,11 +22,38 @@
 #include <rex/thread/fiber.h>
 
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 
 namespace rex::thread {
 
 thread_local Fiber* Fiber::tls_current_ = nullptr;
 
+#if REX_PLATFORM_EMSCRIPTEN
+// MCLA-Reborn (browser runtime, T-022): wasm has no ucontext. A thread fiber is only a marker;
+// guest fibers (Create/SwitchTo) need JSPI or Asyncify (D-051) and stop with a message until
+// then. MCLA made no fiber calls in the native harness runs.
+Fiber* Fiber::ConvertCurrentThread() {
+  auto* f = new Fiber();
+  f->is_thread_fiber_ = true;
+  tls_current_ = f;
+  return f;
+}
+
+Fiber* Fiber::Create(size_t, void (*)(void*), void*) {
+  std::fprintf(stderr, "rex::thread::Fiber::Create: guest fibers are not supported in the "
+                       "browser runtime yet (D-051)\n");
+  std::abort();
+}
+
+void Fiber::Trampoline() {}
+
+void Fiber::SwitchTo(Fiber*) {
+  std::fprintf(stderr, "rex::thread::Fiber::SwitchTo: guest fibers are not supported in the "
+                       "browser runtime yet (D-051)\n");
+  std::abort();
+}
+#else
 Fiber* Fiber::ConvertCurrentThread() {
   auto* f = new Fiber();
   if (getcontext(&f->context_) == -1) {
@@ -67,6 +94,7 @@ void Fiber::SwitchTo(Fiber* target) {
   tls_current_ = target;
   swapcontext(&from->context_, &target->context_);
 }
+#endif  // REX_PLATFORM_EMSCRIPTEN
 
 void Fiber::Destroy() {
   // Thread fibers are destroyed from the owning thread itself.

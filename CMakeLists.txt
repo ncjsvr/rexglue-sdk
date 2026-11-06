@@ -25,6 +25,13 @@ if(REXGLUE_WASM_TRANSLATOR)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_wasm_translator.cmake)
     return()
 endif()
+# MCLA-Reborn: ReXGlue's runtime as a static library for the browser (Emscripten wasm64,
+# pthreads); linked by MCLA-Reborn's runtime/browser. See cmake/rexglue_wasm_runtime.cmake.
+option(REXGLUE_WASM_RUNTIME "Build only the runtime library for Emscripten (browser)" OFF)
+if(REXGLUE_WASM_RUNTIME)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_wasm_runtime.cmake)
+    return()
+endif()
 
 option(REXGLUE_BUILD_TESTS       "Build PPC instruction and unit tests" OFF)
 option(REXGLUE_ENABLE_SANITIZERS "Enable UndefinedBehaviorSanitizer" OFF)

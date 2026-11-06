@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -27,8 +28,17 @@ struct ppc_insn;
 
 namespace rex::codegen::wasm {
 
+/// What the translator knows about a GPR's low word inside the current basic block, for the
+/// physical alias fold (T-050): a constant (lis/addi/ori chains), a stack address (r1, r1 + d),
+/// or nothing. Reset at every case start and after calls.
+struct RegKnowledge {
+  enum Kind : uint8_t { kUnknown, kConst, kStack } kind = kUnknown;
+  uint32_t value = 0;
+};
+
 /// State that lives for one function's translation.
 struct FunctionState {
+  std::array<RegKnowledge, 32> regs{};
   /// Open blocks between the current position and the dispatch loop.
   uint32_t depth = 0;
   /// Start address of each basic-block case -> its index in the dispatch br_table.

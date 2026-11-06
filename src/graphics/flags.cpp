@@ -11,7 +11,9 @@
 
 #include <rex/graphics/flags.h>
 #include <rex/logging.h>
+#if !REXGLUE_WASM_RUNTIME  // MCLA-Reborn: no RenderDoc in the browser build
 #include <rex/ui/renderdoc_api.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
                     "Allow invalid fetch constants");
@@ -42,11 +44,13 @@ bool IsGpuDebugMarkersEnabled() {
       result = true;
       REXLOG_INFO("GPU debug markers enabled via CVar");
     } else {
+#if !REXGLUE_WASM_RUNTIME
       auto renderdoc_api = rex::ui::RenderDocAPI::CreateIfConnected();
       if (renderdoc_api) {
         result = true;
         REXLOG_INFO("GPU debug markers auto-enabled (RenderDoc detected)");
       }
+#endif
     }
   }
   return result;

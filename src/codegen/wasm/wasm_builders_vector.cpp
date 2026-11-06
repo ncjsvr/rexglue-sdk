@@ -108,9 +108,15 @@ void pushVecEa(W& w) {
     w.pushR32(w.opnd(2));
 }
 
+/// Folds the vector ea in kI0 onto the canonical physical range when needed (T-050).
+void foldVecEa(W& w) {
+  foldEaX(w, kI0, w.opnd(1), w.opnd(2), false);
+}
+
 /// lvx, lvxl, lvebx, lvehx, lvewx (+128): the aligned 16 bytes, words reversed.
 void build_lvx(W& w) {
   pushVecEa(w), w.i32(~0xF), w.op(Op::I32And), w.set(kI0);
+  foldVecEa(w);
   pushGuestLinear(w, kI0), w.c.simdMem(Simd::V128Load, 4, 0);
   w.get(kV0);  // placeholder operand for the shuffle (unused lanes)
   w.c.shuffle(kRevWords);
@@ -119,6 +125,7 @@ void build_lvx(W& w) {
 
 void build_stvx(W& w) {
   pushVecEa(w), w.i32(~0xF), w.op(Op::I32And), w.set(kI0);
+  foldVecEa(w);
   pushGuestLinear(w, kI0);
   w.pushV(vD(w)), w.get(kV0), w.c.shuffle(kRevWords);
   w.c.simdMem(Simd::V128Store, 4, 0);
@@ -140,6 +147,7 @@ void pushMaskedLoad(W& w, int32_t base) {
 /// lvlx: VectorMaskL row s = (15 + s - k) for k >= s.
 void build_lvlx(W& w) {
   pushVecEa(w), w.set(kI0);
+  foldVecEa(w);
   pushMaskedLoad(w, 15);
   w.setV(vD(w));
 }
@@ -147,6 +155,7 @@ void build_lvlx(W& w) {
 /// lvrx: VectorMaskR row s = (s - 1 - k) for k < s; zero when s = 0.
 void build_lvrx(W& w) {
   pushVecEa(w), w.set(kI0);
+  foldVecEa(w);
   pushMaskedLoad(w, -1);
   w.setV(vD(w));
 }
@@ -172,6 +181,7 @@ void pushCtxPlus(W& w, uint32_t local) {
 /// stvebx: guest byte ea & 15 of the register (host byte 15 - (ea & 15)).
 void build_stvebx(W& w) {
   pushVecEa(w), w.set(kI0);
+  foldVecEa(w);
   w.i32(15), w.get(kI0), w.i32(0xF), w.op(Op::I32And), w.op(Op::I32Sub), w.set(kI1);
   w.get(kI0), w.i32(3), w.op(Op::I32Xor), w.op(Op::I64ExtendI32U);
   pushCtxPlus(w, kI1), w.c.mem(Op::I32Load8U, 0, w.L().v[vD(w)]);
@@ -181,6 +191,7 @@ void build_stvebx(W& w) {
 /// stvehx: u16[7 - ((ea & 15) >> 1)] at ea & ~1.
 void build_stvehx(W& w) {
   pushVecEa(w), w.i32(~1), w.op(Op::I32And), w.set(kI0);
+  foldVecEa(w);
   w.i32(14), w.get(kI0), w.i32(0xE), w.op(Op::I32And), w.op(Op::I32Sub), w.set(kI1);
   w.get(kI0), w.i32(2), w.op(Op::I32Xor), w.op(Op::I64ExtendI32U);
   pushCtxPlus(w, kI1), w.c.mem(Op::I32Load16U, 1, w.L().v[vD(w)]);
@@ -190,6 +201,7 @@ void build_stvehx(W& w) {
 /// stvewx: u32[3 - ((ea & 15) >> 2)] at ea & ~3.
 void build_stvewx(W& w) {
   pushVecEa(w), w.i32(~3), w.op(Op::I32And), w.set(kI0);
+  foldVecEa(w);
   w.i32(12), w.get(kI0), w.i32(0xC), w.op(Op::I32And), w.op(Op::I32Sub), w.set(kI1);
   w.get(kI0), w.op(Op::I64ExtendI32U);
   pushCtxPlus(w, kI1), w.c.mem(Op::I32Load, 2, w.L().v[vD(w)]);
@@ -227,12 +239,14 @@ void storeBytesLoop(W& w, bool left) {
 
 void build_stvlx(W& w) {
   pushVecEa(w), w.set(kI0);
+  foldVecEa(w);
   w.i32(16), w.get(kI0), w.i32(0xF), w.op(Op::I32And), w.op(Op::I32Sub), w.set(kI2);
   storeBytesLoop(w, true);
 }
 
 void build_stvrx(W& w) {
   pushVecEa(w), w.set(kI0);
+  foldVecEa(w);
   w.get(kI0), w.i32(0xF), w.op(Op::I32And), w.set(kI2);
   storeBytesLoop(w, false);
 }

@@ -42,6 +42,27 @@ void loadValue(W& w, Width width, bool sign, bool mmio, bool aligned);
 /// Stores the value in `valueLocal` (i32 for B/H/W, i64 for D) at the guest address in kI0.
 void storeValue(W& w, Width width, uint32_t valueLocal, bool mmio, bool aligned);
 
+/// Physical alias fold (D-080, T-050). Each folds the guest address in `local` onto the
+/// canonical 0xA0000000 range (CanonicalGuestAddress) unless the access is provably below
+/// 0xC0000000: r1- or r13-relative (stack and KPCR, kept outside the physical views by the ABI),
+/// a stack address derived from r1, or a constant base known in this block whose effective
+/// address is below 0xC0000000. A constant address at or above it is folded at translation
+/// time. Returns true when code that changes `local` was emitted; for update forms the
+/// unfolded address is then kept in kI6 for the write-back to rA (unfoldedEa).
+bool foldEaD(W& w, uint32_t local, uint32_t ra, int32_t disp, bool update);
+bool foldEaX(W& w, uint32_t local, uint32_t ra, uint32_t rb, bool update);
+/// Unconditional run-time fold of `local` (the configured branch or select form).
+void emitAliasFold(W& w, uint32_t local);
+/// The local holding the effective address an update form writes back to rA.
+inline uint32_t unfoldedEa(bool folded) {
+  return folded ? kI6 : kI0;
+}
+
+/// Register knowledge (FunctionState::regs): forgotten at case starts, updated after each
+/// instruction from the registers it writes.
+void ResetRegisterKnowledge(FunctionState& st);
+void TrackRegisterWrites(FunctionState& st, uint32_t word);
+
 /// Pushes the i64 linear address GUEST_BASE + local (i32 guest address).
 void pushGuestLinear(W& w, uint32_t local);
 

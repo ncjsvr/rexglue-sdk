@@ -37,6 +37,7 @@ void build_nothing(W&) {}
 template <bool Double>
 void build_load_reserve(W& w) {
   pushEaX(w, false), w.set(kI0);
+  foldEaX(w, kI0, w.rA(), w.rB(), false);
   pushGuestLinear(w, kI0);
   if (Double) {
     w.c.atomicMem(Atomic::I64Load, 3, 0), w.set(kL1);
@@ -53,6 +54,7 @@ void build_load_reserve(W& w) {
 template <bool Double>
 void build_store_conditional(W& w) {
   pushEaX(w, false), w.set(kI0);
+  foldEaX(w, kI0, w.rA(), w.rB(), false);
   pushGuestLinear(w, kI0);
   if (Double) {
     w.pushU64(w.L().reserved);
@@ -89,6 +91,7 @@ void build_dcbz(W& w) {
   else
     w.pushR32(w.rB());
   w.i32(static_cast<int32_t>(~(Line - 1))), w.op(Op::I32And), w.set(kI0);
+  foldEaX(w, kI0, w.rA(), w.rB(), false);
   pushGuestLinear(w, kI0);
   w.i32(0);
   w.i64(Line);
@@ -282,6 +285,7 @@ void bswap16(W& w) {
 template <Width Wd>
 void build_load_brx(W& w) {
   pushEaX(w, false), w.set(kI0);
+  foldEaX(w, kI0, w.rA(), w.rB(), false);
   loadValue(w, Wd, false, w.mmioCheckXForm(), false);
   w.op(Op::I32WrapI64);
   Wd == Width::W ? bswap32(w) : bswap16(w);
@@ -291,6 +295,7 @@ void build_load_brx(W& w) {
 template <Width Wd>
 void build_store_brx(W& w) {
   pushEaX(w, false), w.set(kI0);
+  foldEaX(w, kI0, w.rA(), w.rB(), false);
   w.pushR32(w.rS());
   Wd == Width::W ? bswap32(w) : bswap16(w);
   w.set(kI4);
@@ -301,6 +306,7 @@ void build_store_brx(W& w) {
 template <bool Store>
 void build_multiple(W& w) {
   pushEaD(w, w.simm(), false), w.set(kI5);
+  foldEaD(w, kI5, w.rA(), w.simm(), false);
   const bool aligned = provablyAligned(w, Width::W, false, false, w.simm());
   for (uint32_t r = w.rD(); r <= 31; ++r) {
     w.get(kI5), w.i32(static_cast<int32_t>(4 * (r - w.rD()))), w.op(Op::I32Add), w.set(kI0);

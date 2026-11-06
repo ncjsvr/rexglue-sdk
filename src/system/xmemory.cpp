@@ -231,9 +231,14 @@ bool Memory::InitializeHeaps() {
                              0x20000000, 4096);
   heaps_.vA0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xA0000000,
                               0x20000000, 64 * 1024, &heaps_.physical);
-  heaps_.vC0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xC0000000,
+  // MCLA-Reborn (T-050): in the external arena the 0xC0000000 and 0xE0000000 heaps use bases
+  // shifted so that their pages are the canonical 0xA0000000-range pages of the same physical
+  // memory (CanonicalGuestAddress), as translated code folds them.
+  uint8_t* vC0000000_membase = canonical_physical_ ? virtual_membase_ - 0x20000000 : virtual_membase_;
+  uint8_t* vE0000000_membase = canonical_physical_ ? virtual_membase_ - 0x3FFFF000 : virtual_membase_;
+  heaps_.vC0000000.Initialize(this, vC0000000_membase, memory::HeapType::kGuestPhysical, 0xC0000000,
                               0x20000000, 16 * 1024 * 1024, &heaps_.physical);
-  heaps_.vE0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xE0000000,
+  heaps_.vE0000000.Initialize(this, vE0000000_membase, memory::HeapType::kGuestPhysical, 0xE0000000,
                               0x1FD00000, 4096, &heaps_.physical);
 
   // Protect the first and last 64kb of memory.
@@ -257,7 +262,10 @@ bool Memory::InitializeHeaps() {
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
 
-#if !REX_PLATFORM_EMSCRIPTEN  // no access faults to handle in the translator tool
+#if !REX_PLATFORM_EMSCRIPTEN || REXGLUE_WASM_RUNTIME
+  // The translator tool has no MMIO handler. The browser runtime needs one for its ranges
+  // (GPU, XMA registers), which translated code reaches through env.mmio_*; wasm has no access
+  // faults, so the handler's fault path is never entered there.
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
       virtual_membase_, physical_membase_, physical_membase_ + 0x1FFFFFFF, HostToGuestVirtualThunk,
@@ -527,32 +535,10 @@ void Memory::Copy(uint32_t dest, uint32_t src, uint32_t size) {
 }
 
 uint32_t Memory::PhysicalToCanonicalVirtual(uint32_t physical_address) const {
-  physical_address &= 0x1FFFFFFF;
-  switch (physical_page_view_.empty() ? 0 : physical_page_view_[physical_address >> 12]) {
-    case 2:
-      return 0xC0000000 + physical_address;
-    case 3:
-      return 0xE0000000 + physical_address - 0x1000;
-    default:
-      return 0xA0000000 + physical_address;
-  }
+  return 0xA0000000 + (physical_address & 0x1FFFFFFF);  // T-050: one canonical range
 }
 
 namespace {
-// Guest virtual address of physical page p in view v (1 A, 2 C, 3 E), or 0 if it has none.
-uint32_t ViewAddress(int view, uint32_t physical_address) {
-  switch (view) {
-    case 1:
-      return 0xA0000000 + physical_address;
-    case 2:
-      return 0xC0000000 + physical_address;
-    case 3:
-      return physical_address >= 0x1000 && physical_address < 0x1FD00000 + 0x1000
-                 ? 0xE0000000 + physical_address - 0x1000
-                 : 0;
-  }
-  return 0;
-}
 int ViewOf(uint32_t virtual_address) {
   return virtual_address >= 0xE0000000 ? 3 : virtual_address >= 0xC0000000 ? 2 : 1;
 }
@@ -573,18 +559,6 @@ void Memory::SetPhysicalOwner(uint32_t virtual_address, uint32_t size, bool allo
       uint32_t(std::min<uint64_t>(uint64_t(PhysicalOf(virtual_address)) + size, 0x20000000));
   for (uint32_t p = first; p < end; p += 4096) {
     physical_page_view_[p >> 12] = allocated ? uint8_t(view) : 0;
-    if (!alias_callback_) {
-      continue;
-    }
-    for (int other = 1; other <= 3; ++other) {
-      uint32_t va = other == view ? 0 : ViewAddress(other, p);
-      if (va) {
-        rex::memory::Protect(virtual_membase_ + va, 4096,
-                             allocated ? rex::memory::PageAccess::kNoAccess
-                                       : rex::memory::PageAccess::kReadWrite,
-                             nullptr);
-      }
-    }
   }
 }
 
@@ -616,18 +590,11 @@ void Memory::CopyToPhysical(uint32_t physical_address, const void* src, size_t s
 
 void Memory::EnableAliasWatch(AliasAccessCallback callback) {
   alias_callback_ = callback;
-  alias_page_logged_.assign(0x60000000 / 4096, 0);
-  // Protect the alias pages of every physical allocation made so far.
-  for (uint32_t p = 0; p < 0x20000000; p += 4096) {
-    int view = physical_page_view_[p >> 12];
-    for (int other = 1; view && other <= 3; ++other) {
-      uint32_t va = other == view ? 0 : ViewAddress(other, p);
-      if (va) {
-        rex::memory::Protect(virtual_membase_ + va, 4096, rex::memory::PageAccess::kNoAccess,
-                             nullptr);
-      }
-    }
-  }
+  alias_page_logged_.assign(0x40000000 / 4096, 0);
+  // T-050: every view folds onto the 0xA0000000 range, so nothing may touch linear memory at
+  // 0xC0000000 and above; an access there missed the fold.
+  rex::memory::Protect(virtual_membase_ + 0xC0000000ull, 0x40000000,
+                       rex::memory::PageAccess::kNoAccess, nullptr);
 }
 
 bool Memory::HandleAliasAccess(void* host_address, bool is_write) {
@@ -639,22 +606,16 @@ bool Memory::HandleAliasAccess(void* host_address, bool is_write) {
     return false;
   }
   uint32_t va = uint32_t(offset);
-  int view = ViewOf(va);
-  uint32_t p = PhysicalOf(va);
-  if (p >= 0x20000000) {
-    return false;
-  }
-  int owner = physical_page_view_[p >> 12];
-  if (!owner || owner == view) {
+  if (va < 0xC0000000) {
     return false;
   }
   ++alias_access_count_;
-  uint32_t page = (va - 0xA0000000) >> 12;
+  uint32_t page = (va - 0xC0000000) >> 12;
   if (!alias_page_logged_[page]) {
     alias_page_logged_[page] = 1;
-    alias_callback_(va, ViewAddress(owner, p & ~0xFFFu) + (va & 0xFFF), is_write);
+    alias_callback_(va, CanonicalGuestAddress(va), is_write);
   }
-  // Allow it from now on (the access reaches this view's own, separate copy of the page).
+  // Allow it from now on (the access reaches an empty copy, not the canonical page).
   rex::memory::Protect(virtual_membase_ + (va & ~0xFFFu), 4096,
                        rex::memory::PageAccess::kReadWrite, nullptr);
   return true;

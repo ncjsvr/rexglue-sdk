@@ -103,6 +103,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
   if (auto v = toml["wasm_chunk_range"].value<int64_t>()) {
     cfg.wasmChunkRange = static_cast<uint32_t>(*v);
   }
+  if (auto v = toml["wasm_alias_fold"].value<std::string>()) {
+    MergeScalar(cfg.wasmAliasFold, *v, "wasm_alias_fold");
+  }
 
   // Bool scalars
   auto hasBool = [&](const char* key) -> bool { return toml[key].is_boolean(); };
@@ -524,6 +527,12 @@ RecompilerConfig::ValidationResult RecompilerConfig::Validate() const {
       result.valid = false;
     }
   };
+
+  if (wasmAliasFold != "branch" && wasmAliasFold != "select" && wasmAliasFold != "none") {
+    result.errors.push_back(fmt::format(
+        "wasm_alias_fold must be \"branch\", \"select\" or \"none\", not \"{}\"", wasmAliasFold));
+    result.valid = false;
+  }
 
   // Check special address alignment
   checkAlignment(longJmpAddress, "longjmp");

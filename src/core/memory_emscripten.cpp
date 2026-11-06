@@ -12,6 +12,11 @@
  * decommitting zeroes, and protection is not enforced. The allocation isn't zeroed up front
  * (that would touch all 4.5 GiB): the XEX loader zeroes the image range before filling it, and
  * a first large allocation comes from fresh, zeroed linear memory anyway.
+ *
+ * The browser runtime (T-022) instead sets an external arena: the guest range reserved inside
+ * the module's own linear memory (the shared memory the translated chunks import). Inside it
+ * every page already exists: reserving and committing return the address, releasing does
+ * nothing, decommitting zeroes, and protection is not enforced.
  */
 
 #include <cstdlib>
@@ -33,14 +38,29 @@ struct Mapping {
   size_t length = 0;
 };
 Mapping g_mapping;
+uintptr_t g_arena_base = 0;
+size_t g_arena_size = 0;
 
 bool InMapping(const void* address, size_t length) {
   auto* p = static_cast<const uint8_t*>(address);
+  if (g_arena_size) {
+    auto a = reinterpret_cast<uintptr_t>(address);
+    return a >= g_arena_base && length <= g_arena_size && a - g_arena_base <= g_arena_size - length;
+  }
   return g_mapping.base && p >= g_mapping.base && length <= g_mapping.length &&
          static_cast<size_t>(p - g_mapping.base) <= g_mapping.length - length;
 }
 
 }  // namespace
+
+void SetExternalArena(void* base, size_t size) {
+  g_arena_base = reinterpret_cast<uintptr_t>(base);
+  g_arena_size = size;
+}
+
+bool IsInExternalArena(const void* address) {
+  return reinterpret_cast<uintptr_t>(address) - g_arena_base < g_arena_size;
+}
 
 size_t page_size() {
   return 4096;

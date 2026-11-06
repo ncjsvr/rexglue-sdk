@@ -41,6 +41,9 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <rex/thread/timer_queue.h>
 
 #include <sched.h>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/threading.h>
+#endif
 
 #if REX_PLATFORM_ANDROID
 #include <dlfcn.h>
@@ -178,6 +181,8 @@ void EnableAffinityConfiguration() {}
 uint32_t current_thread_system_id() {
 #if defined(__APPLE__)
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#elif REX_PLATFORM_EMSCRIPTEN
+  return static_cast<uint32_t>(gettid());
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
@@ -731,7 +736,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
-#if defined(__APPLE__)
+#if REX_PLATFORM_EMSCRIPTEN
+      emscripten_set_thread_name(thread_, std::string(name).c_str());
+#elif defined(__APPLE__)
       // macOS pthread_setname_np() only names the calling thread.
       if (pthread_equal(thread_, pthread_self())) {
         pthread_setname_np(std::string(name).c_str());
@@ -764,7 +771,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   uint64_t affinity_mask() {
     WaitStarted();
-#if defined(__APPLE__)
+#if defined(__APPLE__) || REX_PLATFORM_EMSCRIPTEN  // no affinity masks (browser: workers)
     // macOS doesn't expose Linux-style pthread affinity masks; report every
     // logical processor as available.
     auto cpu_count = std::min<uint32_t>(logical_processor_count(), 64);
@@ -795,7 +802,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void set_affinity_mask(uint64_t mask) {
     WaitStarted();
-#if defined(__APPLE__)
+#if defined(__APPLE__) || REX_PLATFORM_EMSCRIPTEN  // no affinity masks (browser: workers)
     // macOS doesn't expose Linux-style pthread affinity masks; keep this a
     // no-op so higher layers can build and run.
     (void)mask;
@@ -868,7 +875,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
       return;
     }
 
-#if defined(__APPLE__)
+#if REX_PLATFORM_EMSCRIPTEN
+    // MCLA-Reborn (browser runtime): no signals between pthreads. Alertable waits and sleeps
+    // poll the queue every slice (kAlertablePollSlice), so queuing is enough.
+    int result = 0;
+#elif defined(__APPLE__)
     // macOS has no sigqueue/pthread_sigqueue; pthread_kill delivers the signal
     // without the sigval payload.
     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
@@ -1509,7 +1520,9 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_current_thread_name(const std::string_view name) {
-#if defined(__APPLE__)
+#if REX_PLATFORM_EMSCRIPTEN
+  emscripten_set_thread_name(pthread_self(), std::string(name).c_str());
+#elif defined(__APPLE__)
   pthread_setname_np(std::string(name).c_str());
 #else
   pthread_setname_np(pthread_self(), std::string(name).c_str());

@@ -1266,19 +1266,26 @@ struct Access {
   int32_t disp = 0;  // D/DS-form displacement
 };
 
+bool foldAccess(W& w, const Access& a) {
+  return a.indexed ? foldEaX(w, kI0, w.rA(), w.rB(), a.update)
+                   : foldEaD(w, kI0, w.rA(), a.disp, a.update);
+}
+
 void emitLoad(W& w, const Access& a) {
   a.indexed ? pushEaX(w, a.update) : pushEaD(w, a.disp, a.update);
   w.set(kI0);
+  const bool folded = foldAccess(w, a);
   const bool mmio = a.checkMmio && (a.indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
   loadValue(w, a.width, a.sign, mmio, provablyAligned(w, a.width, a.indexed, a.update, a.disp));
   w.setR(w.rD());
   if (a.update)
-    w.get(kI0), w.setR32(w.rA());
+    w.get(unfoldedEa(folded)), w.setR32(w.rA());
 }
 
 void emitStore(W& w, const Access& a) {
   a.indexed ? pushEaX(w, a.update) : pushEaD(w, a.disp, a.update);
   w.set(kI0);
+  const bool folded = foldAccess(w, a);
   const bool mmio = a.checkMmio && (a.indexed ? w.mmioCheckXForm() : w.mmioCheckDForm());
   uint32_t value;
   if (a.width == Width::D) {
@@ -1290,7 +1297,7 @@ void emitStore(W& w, const Access& a) {
   }
   storeValue(w, a.width, value, mmio, provablyAligned(w, a.width, a.indexed, a.update, a.disp));
   if (a.update)
-    w.get(kI0), w.setR32(w.rA());
+    w.get(unfoldedEa(folded)), w.setR32(w.rA());
 }
 
 // MMIO checks follow builders/memory.cpp: plain D/X forms check, update loads and
@@ -1729,6 +1736,11 @@ const IdTable& Ids() {
 
 }  // namespace
 
+AliasFoldStats& GetAliasFoldStats() {
+  static AliasFoldStats stats;
+  return stats;
+}
+
 namespace detail {
 
 void pushEaD(W& w, int32_t disp, bool update) {
@@ -1779,6 +1791,186 @@ void storeValue(W& w, Width width, uint32_t valueLocal, bool mmio, bool aligned)
   w.beginElse();
   plainOrSlowStore(w, width, valueLocal, aligned);
   w.end();
+}
+
+//=============================================================================
+// Physical alias fold (D-080, T-050; see CanonicalGuestAddress in wasm_backend.h)
+//=============================================================================
+
+namespace {
+
+using K = RegKnowledge;
+
+/// Knowledge of a base register: r1 and r13 count as stack-like (outside the physical views).
+K baseKnowledge(const W& w, uint32_t r) {
+  if (r == 1 || r == 13)
+    return {K::kStack, 0};
+  return w.st.regs[r];
+}
+
+/// Pushes the canonical address of the guest address in `local` (valid at or above 0xC0000000).
+void pushCanonical(W& w, uint32_t local) {
+  w.get(local), w.i32(0x1FFFFFFF), w.op(Op::I32And);
+  w.i32(static_cast<int32_t>(kCanonicalPhysicalBase)), w.op(Op::I32Or);
+  w.get(local), w.i32(17), w.op(Op::I32ShrU), w.i32(0x1000), w.op(Op::I32And);
+  w.op(Op::I32Add);
+}
+
+bool foldOff(const W& w) {
+  return w.config().wasmAliasFold == "none";
+}
+
+bool plain() {
+  GetAliasFoldStats().plain++;
+  return false;
+}
+
+}  // namespace
+
+void emitAliasFold(W& w, uint32_t local) {
+  if (w.config().wasmAliasFold == "select") {
+    pushCanonical(w, local);
+    w.get(local);
+    w.get(local), w.i32(static_cast<int32_t>(kAliasFoldStart)), w.op(Op::I32GeU);
+    w.op(Op::Select);
+    w.set(local);
+    return;
+  }
+  w.get(local), w.i32(static_cast<int32_t>(kAliasFoldStart)), w.op(Op::I32GeU);
+  w.beginIf();
+  pushCanonical(w, local);
+  w.set(local);
+  w.end();
+}
+
+bool foldEaD(W& w, uint32_t local, uint32_t ra, int32_t disp, bool update) {
+  if (foldOff(w))
+    return false;
+  if (ra == 0 && !update) {
+    const uint32_t ea = static_cast<uint32_t>(disp);
+    if (ea < kAliasFoldStart)
+      return plain();
+    GetAliasFoldStats().constant++;
+    w.i32(static_cast<int32_t>(CanonicalGuestAddress(ea))), w.set(local);
+    return true;
+  }
+  const K k = baseKnowledge(w, ra);
+  if (k.kind == K::kStack)
+    return plain();
+  if (k.kind == K::kConst && k.value + static_cast<uint32_t>(disp) < kAliasFoldStart)
+    return plain();
+  GetAliasFoldStats().checked++;
+  if (update)
+    w.get(local), w.set(kI6);
+  emitAliasFold(w, local);
+  return true;
+}
+
+bool foldEaX(W& w, uint32_t local, uint32_t ra, uint32_t rb, bool update) {
+  if (foldOff(w))
+    return false;
+  const K a = ra == 0 && !update ? K{K::kConst, 0} : baseKnowledge(w, ra);
+  const K b = baseKnowledge(w, rb);
+  if (a.kind == K::kConst && b.kind == K::kConst && a.value + b.value < kAliasFoldStart)
+    return plain();
+  // A stack address plus a small known offset stays on the stack.
+  auto small = [](const K& k) { return k.kind == K::kConst && k.value + 0x8000u < 0x10000u; };
+  if ((a.kind == K::kStack && small(b)) || (b.kind == K::kStack && small(a)))
+    return plain();
+  GetAliasFoldStats().checked++;
+  if (update)
+    w.get(local), w.set(kI6);
+  emitAliasFold(w, local);
+  return true;
+}
+
+void ResetRegisterKnowledge(FunctionState& st) {
+  st.regs.fill({});
+}
+
+void TrackRegisterWrites(FunctionState& st, uint32_t word) {
+  auto& r = st.regs;
+  const uint32_t opcd = word >> 26;
+  const uint32_t rd = (word >> 21) & 31, ra = (word >> 16) & 31, rb = (word >> 11) & 31;
+  const uint32_t simm = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(word)));
+  const uint32_t uimm = word & 0xFFFF;
+  const auto isStack = [&](uint32_t n) { return n == 1 || r[n].kind == K::kStack; };
+  switch (opcd) {
+    case 14: {  // addi (li)
+      K k;
+      if (ra == 0)
+        k = {K::kConst, simm};
+      else if (isStack(ra))
+        k = {K::kStack, 0};
+      else if (r[ra].kind == K::kConst)
+        k = {K::kConst, r[ra].value + simm};
+      r[rd] = k;
+      return;
+    }
+    case 15: {  // addis (lis)
+      K k;
+      if (ra == 0)
+        k = {K::kConst, uimm << 16};
+      else if (r[ra].kind == K::kConst && ra != 1)
+        k = {K::kConst, r[ra].value + (uimm << 16)};
+      r[rd] = k;
+      return;
+    }
+    case 24:    // ori rA, rS, uimm
+    case 25: {  // oris
+      K k;
+      if (r[rd].kind == K::kConst && rd != 1)
+        k = {K::kConst, r[rd].value | (opcd == 24 ? uimm : uimm << 16)};
+      else if (isStack(rd) && uimm == 0)
+        k = {K::kStack, 0};
+      r[ra] = k;
+      return;
+    }
+    case 32: case 34: case 40: case 42:  // lwz lbz lhz lha
+      r[rd] = {};
+      return;
+    case 33: case 35: case 41: case 43:  // update loads
+      r[rd] = {}, r[ra] = {};
+      return;
+    case 36: case 38: case 44: case 47:  // stw stb sth stmw
+    case 48: case 50: case 52: case 54:  // lfs lfd stfs stfd
+      return;
+    case 37: case 39: case 45:           // update stores
+    case 49: case 51: case 53: case 55:  // FP update forms
+      r[ra] = {};
+      return;
+    case 46:  // lmw
+      for (uint32_t n = rd; n < 32; ++n)
+        r[n] = {};
+      return;
+    case 62:  // std / stdu
+      if ((word & 3) == 1)
+        r[ra] = {};
+      return;
+    case 16: case 18: case 19:  // branches: a linking one is a call and may change anything
+      if (word & 1)
+        r.fill({});
+      return;
+    case 17:  // sc
+      r.fill({});
+      return;
+    case 31: {
+      const uint32_t xo = (word >> 1) & 0x3FF;
+      if (xo == 444 && rd == rb) {  // mr rA, rS
+        r[ra] = rd == 1 ? K{K::kStack, 0} : r[rd];
+        return;
+      }
+      if (xo == 533 || xo == 597) {  // lswx, lswi
+        r.fill({});
+        return;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  // Everything else writes at most the registers in the rD/rS and rA fields.
+  r[rd] = {}, r[ra] = {};
 }
 
 void pushGuestLinear(W& w, uint32_t local) {

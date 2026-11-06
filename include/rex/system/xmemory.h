@@ -50,11 +50,24 @@ constexpr u32 PhysicalHostOffset([[maybe_unused]] u32 guest_addr) noexcept {
 
 namespace rex::memory {
 
+/// MCLA-Reborn (D-080, T-050): in the ADR-0009 layout (one linear memory, no aliased views) the
+/// bytes of physical address p live once, at guest address 0xA0000000 + p, and the 0xC0000000
+/// and 0xE0000000 views fold onto that range (0xE0000000 is physical 0x1000, as PhysicalHeap
+/// defines it). Translated code applies the same fold (codegen/wasm/wasm_backend.h).
+constexpr u32 CanonicalGuestAddress(u32 guest_address) noexcept {
+  return guest_address < 0xC0000000u
+             ? guest_address
+             : ((guest_address & 0x1FFFFFFFu) | 0xA0000000u) + ((guest_address >> 17) & 0x1000u);
+}
+
 /// Lightweight guest-to-host pointer translation using the memory base.
 /// For hooks and kernel code operating with the base pointer directly.
 /// Same raw arithmetic as recompiled code; no Memory* or heap lookup needed.
 template <typename T = u8*>
 inline T GuestPtr(u8* base, u32 guest_address) noexcept {
+  if (guest_storage::enabled()) [[unlikely]] {  // ADR-0009 layout (T-050)
+    return reinterpret_cast<T>(base + CanonicalGuestAddress(guest_address));
+  }
   return reinterpret_cast<T>(base + guest_address + detail::PhysicalHostOffset(guest_address));
 }
 
@@ -385,6 +398,9 @@ class Memory {
   // Note that the contents at the specified host address are big-endian.
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) const {
+    if (canonical_physical_) [[unlikely]] {  // MCLA-Reborn (T-050): views fold onto 0xA0000000
+      return reinterpret_cast<T>(virtual_membase_ + CanonicalGuestAddress(guest_address));
+    }
     uint8_t* host_address = virtual_membase_ + guest_address;
     const auto heap = LookupHeap(guest_address);
     if (heap) {
@@ -403,8 +419,7 @@ class Memory {
   template <typename T = uint8_t*>
   inline T TranslatePhysical(uint32_t guest_address) const {
     if (canonical_physical_) [[unlikely]] {
-      return reinterpret_cast<T>(virtual_membase_ +
-                                 PhysicalToCanonicalVirtual(guest_address & 0x1FFFFFFF));
+      return reinterpret_cast<T>(virtual_membase_ + 0xA0000000u + (guest_address & 0x1FFFFFFF));
     }
     return reinterpret_cast<T>(physical_membase_ + (guest_address & 0x1FFFFFFF));
   }
@@ -413,21 +428,25 @@ class Memory {
   // External arena (MCLA-Reborn, T-017; docs/research/native-harness.md)
   //==========================================================================
   // The native harness places guest memory inside its wasmtime shared memory instead of a
-  // file mapping: guest address ga lives at virtual_membase + ga for every ga, with no aliased
-  // views (ADR-0009). Each physical allocation then has ONE canonical guest range, the one in
-  // the view (0xA0000000, 0xC0000000 or 0xE0000000) it was allocated through, and
-  // TranslatePhysical resolves to it. `physical_membase` is a separate 512 MiB range used only
-  // for the physical heap's own bookkeeping. Must be called before Initialize().
+  // file mapping, with no aliased views (ADR-0009): guest address ga lives at
+  // virtual_membase + CanonicalGuestAddress(ga), so physical address p is at
+  // virtual_membase + 0xA0000000 + p whichever view (0xA0000000, 0xC0000000 or 0xE0000000)
+  // reaches it, exactly as translated code folds it (D-080, T-050). The 0xC0000000 and
+  // 0xE0000000 heaps use shifted bases so that their pages are those canonical pages.
+  // `physical_membase` is a separate 512 MiB range used only for the physical heap's own
+  // bookkeeping. Must be called before Initialize().
   static void SetExternalArena(uint8_t* virtual_membase, uint8_t* physical_membase);
   bool uses_external_arena() const { return canonical_physical_; }
 
   // Guest virtual address of the canonical range for physical address p (0..0x1FFFFFFF):
-  // the view the page was allocated through, or the 0xA0000000 view if it is unallocated.
+  // 0xA0000000 + p (T-050).
   uint32_t PhysicalToCanonicalVirtual(uint32_t physical_address) const;
 
-  // Alias watch (T-017 acceptance criterion): while enabled, the pages of each physical
-  // allocation are made inaccessible in the two views it was not allocated through, and an
-  // access to one is logged (once per page) through the callback, then allowed.
+  // Alias watch (T-017, T-050): while enabled, linear memory at virtual_membase + 0xC0000000 and
+  // above, which only an access that missed the fold could reach (it would read or write an
+  // empty copy instead of the canonical page), is inaccessible; an access there is logged
+  // (once per page) through the callback with the canonical address it should have used, then
+  // allowed.
   using AliasAccessCallback = void (*)(uint32_t guest_address, uint32_t canonical_address,
                                        bool is_write);
 
@@ -665,6 +684,7 @@ class Memory {
   bool HandleAliasAccess(void* host_address, bool is_write);
   bool canonical_physical_ = false;
   std::vector<uint8_t> physical_page_view_;  // per 4 KiB physical page: 0 none, 1 A, 2 C, 3 E
+                                             // (the view it was allocated through; for logs)
   AliasAccessCallback alias_callback_ = nullptr;
   std::vector<uint8_t> alias_page_logged_;  // per 4 KiB guest page in 0xA0000000+
   uint64_t alias_access_count_ = 0;

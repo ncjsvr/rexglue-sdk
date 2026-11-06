@@ -21,6 +21,63 @@
 #include <rex/platform.h>
 #include <rex/stream.h>
 
+#if REXGLUE_WASM_RUNTIME
+// MCLA-Reborn (browser runtime, T-022): no FFmpeg in the browser build. This silent stand-in
+// "decodes" every XMA frame to zeros, so the packet parsing, output ring and loop handling below
+// run unchanged and the game's audio streaming advances while staying silent. MCLA-Reborn's own
+// XMA decoder replaces it later (D-008).
+#include <cstdio>
+struct AVPacket {
+  uint8_t* data = nullptr;
+  int size = 0;
+  void* buf = nullptr;
+};
+struct AVCodec {
+  int unused = 0;
+};
+struct AVCodecContext {
+  int sample_rate = 0;
+  int channels = 0;
+  int flags2 = 0;
+};
+struct AVFrame {
+  uint8_t* data[8] = {};
+};
+#define AV_CODEC_FLAG2_SKIP_MANUAL 0
+#define AV_ERROR_MAX_STRING_SIZE 64
+#define AV_CODEC_ID_XMAFRAMES 0
+#ifndef AVERROR
+#define AVERROR(e) (-(e))
+#endif
+namespace {
+alignas(16) float silent_samples[2][4096] = {};
+AVPacket* av_packet_alloc() { return new AVPacket(); }
+void* av_buffer_alloc(size_t) { return nullptr; }
+AVCodec* avcodec_find_decoder(int) {
+  static AVCodec codec;
+  return &codec;
+}
+AVCodecContext* avcodec_alloc_context3(const AVCodec*) { return new AVCodecContext(); }
+AVFrame* av_frame_alloc() {
+  auto* frame = new AVFrame();
+  frame->data[0] = reinterpret_cast<uint8_t*>(silent_samples[0]);
+  frame->data[1] = reinterpret_cast<uint8_t*>(silent_samples[1]);
+  return frame;
+}
+void avcodec_free_context(AVCodecContext** context) {
+  delete *context;
+  *context = nullptr;
+}
+void av_frame_free(AVFrame** frame) {
+  delete *frame;
+  *frame = nullptr;
+}
+int avcodec_open2(AVCodecContext*, const AVCodec*, void*) { return 0; }
+int avcodec_send_packet(AVCodecContext*, const AVPacket*) { return 0; }
+int avcodec_receive_frame(AVCodecContext*, AVFrame*) { return 0; }
+void av_strerror(int, char* buf, size_t size) { std::snprintf(buf, size, "silent decoder"); }
+}  // namespace
+#else
 extern "C" {
 #if REX_COMPILER_MSVC
 #pragma warning(push)
@@ -32,6 +89,7 @@ extern "C" {
 #pragma warning(pop)
 #endif
 }  // extern "C"
+#endif  // REXGLUE_WASM_RUNTIME
 
 // Credits for most of this code goes to:
 // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
