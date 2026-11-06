@@ -345,7 +345,8 @@ std::string WgslShaderTranslator::BuildEntryPoint(const std::string& main_body) 
       }
     }
     if (shader.writes_depth()) {
-      s += "  xe_output.depth = xe_depth;\n";
+      s += fmt::format("  xe_output.depth = xe_depth * select(1.0, 0.5, (xe_system.flags & {}u) != 0u);\n",
+                       uint32_t(kSysFlag_DepthFloat24));
     }
     s += "  return xe_output;\n";
   }

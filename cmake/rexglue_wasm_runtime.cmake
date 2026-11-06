@@ -270,10 +270,12 @@ add_library(rex::runtime_wasm ALIAS rexruntime_wasm)
 # MCLA-Reborn (T-029): what a WebGPU backend in the host needs on top of the GPU base classes:
 # the microcode analysis (Shader), the shared ShaderTranslator with the WGSL translator, and the
 # draw utilities (viewport, scissor, resolve info). Only for the browser runtime build.
-option(REXGLUE_WASM_WEBGPU "Add shader analysis, the WGSL translator and draw utilities" OFF)
+option(REXGLUE_WASM_WEBGPU "Add shader translation, draw utilities and the render target cache" OFF)
 if(REXGLUE_WASM_WEBGPU)
   target_sources(rexruntime_wasm PRIVATE
       ${_gpu}/format/ucode.cpp
+      ${_gpu}/pipeline/render_target/cache.cpp
+      ${_gpu}/pipeline/shader/interpreter.cpp
       ${_gpu}/pipeline/shader/shader.cpp
       ${_gpu}/pipeline/shader/translator.cpp
       ${_gpu}/pipeline/shader/translator_disasm.cpp
@@ -281,6 +283,7 @@ if(REXGLUE_WASM_WEBGPU)
       ${_gpu}/pipeline/shader/wgsl_translator_alu.cpp
       ${_gpu}/pipeline/shader/wgsl_translator_fetch.cpp
       ${_gpu}/util/draw.cpp
+      ${_gpu}/util/draw_extent_estimator.cpp
       ${REXGLUE_ROOT}/src/ui/graphics_util.cpp)
   target_compile_definitions(rexruntime_wasm PUBLIC REXGLUE_WASM_WEBGPU=1)
 endif()

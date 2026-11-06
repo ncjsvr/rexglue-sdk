@@ -165,12 +165,19 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
     if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
       if (i < vgt_dma_size.num_words) {
         if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
-          vertex_index = index_buffer_16[i];
+          const uint16_t* address = &index_buffer_16[i];
+          uint16_t raw = rex::guest_storage::contains(address)
+                             ? rex::byte_swap(rex::guest_storage::load<uint16_t>(address))
+                             : *address;
+          vertex_index = xenos::GpuSwap(raw, index_endian);
         } else {
-          vertex_index = index_buffer_32[i];
+          const uint32_t* address = &index_buffer_32[i];
+          uint32_t raw = *address;
+          if (rex::guest_storage::contains(address)) raw = rex::byte_swap(raw);
+          vertex_index = xenos::GpuSwap(raw, index_endian);
         }
         // The Xenos only uses 24 bits of the index (reset_indx is 24-bit).
-        vertex_index = xenos::GpuSwap(vertex_index, index_endian) & 0xFFFFFF;
+        vertex_index &= 0xFFFFFF;
       } else {
         vertex_index = 0;
       }

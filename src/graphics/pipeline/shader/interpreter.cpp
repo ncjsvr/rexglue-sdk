@@ -949,7 +949,6 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
       xenos::GetVertexFormatNeededWords(instr.data_format(), used_result_components);
   if (needed_dwords) {
     uint32_t data[4] = {};
-    const uint32_t* memory_dwords = reinterpret_cast<const uint32_t*>(memory_.physical_membase());
     uint32_t buffer_end_dwords = fetch_constant.address + fetch_constant.size;
     uint32_t dword_0_address_dwords =
         uint32_t(int32_t(state_.vfetch_address_dwords) + instr.offset());
@@ -961,7 +960,11 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
       uint32_t dword_address_dwords = dword_0_address_dwords + i;
       if (dword_address_dwords >= fetch_constant.address &&
           dword_address_dwords < buffer_end_dwords) {
-        dword_value = xenos::GpuSwap(memory_dwords[dword_address_dwords], fetch_constant.endian);
+        const auto* address =
+            memory_.TranslatePhysical<const uint32_t*>(dword_address_dwords * sizeof(uint32_t));
+        uint32_t raw = *address;
+        if (rex::guest_storage::contains(address)) raw = rex::byte_swap(raw);
+        dword_value = xenos::GpuSwap(raw, fetch_constant.endian);
       }
       data[i] = dword_value;
     }

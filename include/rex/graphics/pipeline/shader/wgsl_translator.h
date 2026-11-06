@@ -33,7 +33,7 @@ class WgslShaderTranslator : public ShaderTranslator {
  public:
   // Bump when the generated WGSL, the binding layout, the system constants or the Modification
   // layout change: it is part of every shader cache key.
-  static constexpr uint32_t kVersion = 1;
+  static constexpr uint32_t kVersion = 2;
 
   // Translation-time state, the WGSL counterpart of SpirvShaderTranslator::Modification.
   union Modification {
@@ -81,6 +81,7 @@ class WgslShaderTranslator : public ShaderTranslator {
     kSysFlag_AlphaPassIfGreater = 1u << 7,
     kSysFlag_ConvertColor0ToGamma_Shift = 8,
     kSysFlag_ConvertColor0ToGamma = 1u << 8,
+    kSysFlag_DepthFloat24 = 1u << 12,
   };
 
   // Uniform buffer at @group(1) @binding(0), WGSL uniform layout (vec3 aligned to 16 bytes).
