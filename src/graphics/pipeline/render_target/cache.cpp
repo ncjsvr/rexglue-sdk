@@ -942,16 +942,18 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
 
   uint32_t pitch_tiles_at_32bpp;
   uint32_t base_offset_tiles_at_32bpp;
+  // ResolveEdramInfo stores the offset base in 11 bits, so subtract it modulo EDRAM.
+  constexpr uint32_t kTileMask = xenos::kEdramTileCount - 1;
   xenos::MsaaSamples msaa_samples;
   if (resolve_info.IsClearingDepth()) {
     pitch_tiles_at_32bpp = resolve_info.depth_edram_info.pitch_tiles;
     base_offset_tiles_at_32bpp =
-        resolve_info.depth_edram_info.base_tiles - resolve_info.depth_original_base;
+        (resolve_info.depth_edram_info.base_tiles - resolve_info.depth_original_base) & kTileMask;
     msaa_samples = resolve_info.depth_edram_info.msaa_samples;
   } else if (resolve_info.IsClearingColor()) {
     pitch_tiles_at_32bpp = resolve_info.color_edram_info.pitch_tiles;
     base_offset_tiles_at_32bpp =
-        resolve_info.color_edram_info.base_tiles - resolve_info.color_original_base;
+        (resolve_info.color_edram_info.base_tiles - resolve_info.color_original_base) & kTileMask;
     if (resolve_info.color_edram_info.format_is_64bpp) {
       assert_zero(pitch_tiles_at_32bpp & 1);
       pitch_tiles_at_32bpp >>= 1;
