@@ -89,7 +89,9 @@ target_compile_features(translator_lzx PUBLIC cxx_std_20)
 set(_core ${REXGLUE_ROOT}/src/core)
 set(_sys ${REXGLUE_ROOT}/src/system)
 set(_cg ${REXGLUE_ROOT}/src/codegen)
-add_executable(rexglue-translate
+# The tool's objects, compiled once and linked twice: for Node (rexglue-translate.js) and for a
+# browser worker (rexglue-translate-web.mjs, T-023).
+add_library(rexglue_translate_objs OBJECT
     # CLI, ISO reader, kernel export tables (names only)
     ${REXGLUE_ROOT}/src/translator/main.cpp
     ${REXGLUE_ROOT}/src/translator/xdvdfs.cpp
@@ -152,12 +154,12 @@ add_executable(rexglue-translate
     ${_cg}/wasm/wasm_function.cpp
     ${_cg}/wasm/wasm_writer.cpp
 )
-target_compile_definitions(rexglue-translate PRIVATE
+target_compile_definitions(rexglue_translate_objs PRIVATE
     REXGLUE_TRANSLATOR_PPC=1
     REXGLUE_TRANSLATOR_LZX=1
     REXGLUE_NO_CPP_BACKEND=1
     REXGLUE_NO_RUNTIME=1)
-target_include_directories(rexglue-translate PRIVATE
+target_include_directories(rexglue_translate_objs PRIVATE
     ${REXGLUE_ROOT}/include
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${REXGLUE_ROOT}/thirdparty
@@ -169,9 +171,11 @@ target_include_directories(rexglue-translate PRIVATE
     ${_cg}
     ${_cg}/builders
     ${REXGLUE_ROOT}/src)
-target_compile_options(rexglue-translate PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(rexglue-translate PRIVATE
+target_compile_options(rexglue_translate_objs PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(rexglue_translate_objs PUBLIC
     translator_ppc translator_lzx fmt::fmt spdlog::spdlog xxHash::xxhash aes128)
+add_executable(rexglue-translate $<TARGET_OBJECTS:rexglue_translate_objs>)
+target_link_libraries(rexglue-translate PRIVATE rexglue_translate_objs)
 # Node: real filesystem access (NODERAWFS), a 64-bit address space with room for the 4.5 GiB
 # guest address space plus the analysis (MAXIMUM_MEMORY), no threads (the codegen is
 # single-threaded). EXIT_RUNTIME so the exit code reaches the shell.
@@ -180,3 +184,33 @@ target_link_options(rexglue-translate PRIVATE
     -sINITIAL_MEMORY=64MB -sSTACK_SIZE=8MB -sEXIT_RUNTIME=1
     "SHELL:--emit-symbol-map" -Wl,--error-limit=0)
 set_target_properties(rexglue-translate PROPERTIES SUFFIX ".js")
+
+# Browser worker (T-023): an ES module factory for a dedicated worker. No NODERAWFS: the page's
+# worker puts default.xex and the config into Emscripten's in-memory file system, calls main
+# through callMain and copies the output into OPFS. Same memory limits as the Node build.
+add_executable(rexglue-translate-web $<TARGET_OBJECTS:rexglue_translate_objs>)
+target_link_libraries(rexglue-translate-web PRIVATE rexglue_translate_objs)
+target_link_options(rexglue-translate-web PRIVATE
+    -sENVIRONMENT=worker -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createTranslator
+    -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sFORCE_FILESYSTEM=1
+    -sEXPORTED_RUNTIME_METHODS=callMain,FS
+    -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=16GB -sINITIAL_MEMORY=64MB -sSTACK_SIZE=8MB
+    -Wl,--error-limit=0)
+set_target_properties(rexglue-translate-web PROPERTIES SUFFIX ".mjs")
+
+# The versions the output is tagged with (wasm_writer.h, wasm_backend.h), for the web shell's
+# version check before it loads the translator (D-046).
+file(STRINGS ${_cg}/wasm/wasm_writer.h _tv_line REGEX "kTranslatorVersion = \"")
+file(STRINGS ${_cg}/wasm/wasm_backend.h _abi_line REGEX "kAbiVersion = [0-9]+")
+string(REGEX MATCH "\"([^\"]+)\"" _ "${_tv_line}")
+set(REXGLUE_TRANSLATOR_VERSION "${CMAKE_MATCH_1}")
+string(REGEX MATCH "= ([0-9]+)" _ "${_abi_line}")
+set(REXGLUE_ABI_VERSION "${CMAKE_MATCH_1}")
+if(NOT REXGLUE_TRANSLATOR_VERSION OR NOT REXGLUE_ABI_VERSION)
+  message(FATAL_ERROR "Cannot read kTranslatorVersion / kAbiVersion from src/codegen/wasm")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_cg}/wasm/wasm_writer.h ${_cg}/wasm/wasm_backend.h)
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rexglue-translate-web.json
+    "{\"translator_version\": \"${REXGLUE_TRANSLATOR_VERSION}\", \"abi_version\": ${REXGLUE_ABI_VERSION}}
+")

@@ -11,7 +11,7 @@
  * chunk modules plus manifest.json with the wasm backend. It has no C++ backend.
  *
  *   rexglue-translate --config <manifest.toml> (--iso <image> | --xex <file>) [--out <dir>]
- *                     [--force] [--log-level <level>]
+ *                     [--force] [--log-level <level>] [--progress]
  *   rexglue-translate --tests <bin-dir> --asm <asm-dir> --out <dir>
  *
  * The second form translates the assembled PowerPC fixture corpus exactly as
@@ -20,6 +20,10 @@
  * The TOML is a ReXGlue manifest ([project], [entrypoint] with backend = "wasm" and the
  * analysis entries); its file_path is used only when neither --iso nor --xex is given, and
  * --out overrides out_directory_path.
+ *
+ * --progress prints one line per step, "MCLA-TRANSLATE {"step":"<name>","t":<seconds>}", with
+ * the steps read, load, the analysis phases (Register, Scan, Discover, GapFill, Merge,
+ * Validate), write and done. The browser worker (T-023) shows them as progress.
  */
 
 #include <chrono>
@@ -38,6 +42,7 @@
 #include <rex/codegen/binary_view.h>
 #include <rex/codegen/codegen_context.h>
 #include <rex/codegen/manifest.h>
+#include <rex/codegen/progress_reporter.h>
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/system/export_resolver.h>
@@ -64,7 +69,7 @@ double Seconds(Clock::time_point from, Clock::time_point to) {
 void Usage() {
   std::fprintf(stderr,
                "usage: rexglue-translate --config <manifest.toml> (--iso <image> | --xex <file>)\n"
-               "                         [--out <dir>] [--force] [--log-level <level>]\n"
+               "                         [--out <dir>] [--force] [--log-level <level>] [--progress]\n"
                "       rexglue-translate --tests <bin-dir> --asm <asm-dir> --out <dir>\n");
 }
 
@@ -89,12 +94,31 @@ bool ReadFile(const fs::path& path, std::vector<uint8_t>& out) {
   return static_cast<bool>(in.read(reinterpret_cast<char*>(out.data()), out.size()));
 }
 
+// --progress: one machine-readable line per step, flushed so a host sees it at once.
+class StepPrinter : public rex::codegen::ProgressReporter {
+ public:
+  explicit StepPrinter(Clock::time_point start) : start_(start) {}
+  void step(std::string_view name) const {
+    std::printf("MCLA-TRANSLATE {\"step\":\"%.*s\",\"t\":%.3f}\n", int(name.size()),
+                name.data(), Seconds(start_, Clock::now()));
+    std::fflush(stdout);
+  }
+  void moduleStarted(std::string_view, std::size_t, std::size_t) override {}
+  void phaseChanged(std::string_view name) override { step(name); }
+  void moduleFinished(std::chrono::milliseconds) override {}
+  void projectPhaseStarted(std::string_view) override {}
+  void projectPhaseFinished() override {}
+
+ private:
+  Clock::time_point start_;
+};
+
 }  // namespace
 
 int Run(int argc, char** argv) {
   const auto tStart = Clock::now();
   std::string configArg, isoArg, xexArg, outArg, testsArg, asmArg, logLevel = "info";
-  bool force = false;
+  bool force = false, progress = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto value = [&](std::string& dst) {
@@ -120,6 +144,8 @@ int Run(int argc, char** argv) {
       ok = value(logLevel);
     else if (a == "--force")
       force = true;
+    else if (a == "--progress")
+      progress = true;
     else if (a == "--version") {
       std::printf("rexglue-translate %s (ReXGlue %s, translator %s)\n", REXGLUE_VERSION_STRING,
                   REXGLUE_VERSION_STRING, rex::codegen::wasm::kTranslatorVersion);
@@ -174,7 +200,14 @@ int Run(int argc, char** argv) {
   config.outDirectoryPath =
       outArg.empty() ? Resolve(configDir, config.outDirectoryPath).string() : outArg;
 
+  StepPrinter steps(tStart);
+  auto step = [&](std::string_view name) {
+    if (progress)
+      steps.step(name);
+  };
+
   // Input bytes.
+  step("read");
   std::vector<uint8_t> xexBytes;
   std::string source;
   if (!isoArg.empty()) {
@@ -198,6 +231,7 @@ int Run(int argc, char** argv) {
   REXLOG_INFO("Read {} bytes from {}", xexBytes.size(), source);
 
   // Load as ReXGlue does: guest memory, export names, XexModule.
+  step("load");
   rex::memory::Memory memory;
   if (!memory.Initialize()) {
     REXLOG_ERROR("Guest memory initialisation failed");
@@ -237,7 +271,7 @@ int Run(int argc, char** argv) {
   if (ctx.Config().isDll.has_value())
     ctx.setDllModule(*ctx.Config().isDll);
 
-  auto analysis = rex::codegen::Analyze(ctx);
+  auto analysis = rex::codegen::Analyze(ctx, progress ? &steps : nullptr);
   if (!analysis) {
     if (!(force && analysis.error().category == rex::ErrorCategory::Validation)) {
       REXLOG_ERROR("Analysis failed: {}", analysis.error().message);
@@ -247,6 +281,7 @@ int Run(int argc, char** argv) {
   }
   const auto tAnalyze = Clock::now();
 
+  step("write");
   rex::codegen::wasm::WasmWriter writer(ctx);
   writer.setTitle(titleId, xexVersion);
   if (!writer.write(force)) {
@@ -263,6 +298,7 @@ int Run(int argc, char** argv) {
       "rexglue-translate: read %.2f s, load %.2f s, analyse %.2f s, write %.2f s, total %.2f s\n",
       Seconds(tStart, tRead), Seconds(tRead, tLoad), Seconds(tLoad, tAnalyze),
       Seconds(tAnalyze, tWrite), Seconds(tStart, tWrite));
+  step("done");
   rex::ShutdownLogging();
   return 0;
 }
