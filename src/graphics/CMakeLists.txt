@@ -96,6 +96,19 @@ if(REXGLUE_USE_D3D12)
         ${REXGPU_XENOS_D3D12_SOURCES})
 endif()
 
+# MCLA-Reborn (T-028): Xenos microcode to WGSL for a WebGPU backend. Off by default, so the
+# Vulkan and D3D12 builds are unchanged; MCLA-Reborn's gpu-webgpu project compiles these
+# sources directly.
+option(REXGLUE_WGSL_TRANSLATOR "Compile the WGSL shader translator into rexgpu-xenos" OFF)
+set(REXGPU_XENOS_WGSL_SOURCES
+    pipeline/shader/wgsl_translator.cpp
+    pipeline/shader/wgsl_translator_alu.cpp
+    pipeline/shader/wgsl_translator_fetch.cpp
+)
+if(REXGLUE_WGSL_TRANSLATOR)
+    list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_WGSL_SOURCES})
+endif()
+
 add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
 add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
 
