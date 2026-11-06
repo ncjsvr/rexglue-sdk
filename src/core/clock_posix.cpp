@@ -25,6 +25,11 @@ uint64_t Clock::host_tick_frequency_platform() {
   mach_timebase_info_data_t info;
   mach_timebase_info(&info);
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) / (uint64_t)info.numer);
+#elif defined(__EMSCRIPTEN__)
+  // Emscripten has no CLOCK_MONOTONIC_RAW (clock_getres and clock_gettime fail with EINVAL and
+  // leave the timespec unset) and reports CLOCK_MONOTONIC's resolution as 1 us while counting
+  // in ns. host_tick_count_platform() counts CLOCK_MONOTONIC in ns, so the frequency is 1 GHz.
+  return 1000000000ull;
 #else
   timespec res;
   int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
@@ -45,7 +50,11 @@ uint64_t Clock::host_tick_count_platform() {
   return mach_absolute_time();
 #else
   timespec tp;
+#ifdef __EMSCRIPTEN__
+  int error = clock_gettime(CLOCK_MONOTONIC, &tp);  // performance.now(); no _RAW clock here
+#else
   int error = clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+#endif
   assert_zero(error);
 
   return tp.tv_nsec + tp.tv_sec * 1000000000ull;
