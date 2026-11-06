@@ -249,6 +249,79 @@ std::vector<TestSpec> ParseTestSpecs(const std::string& asmPath,
   return specs;
 }
 
+/**
+ * Mid-asm hooks for wasm fixtures (MCLA-Reborn, T-019). A fixture configures them with lines
+ *   #@ midasm_hook at=<label> name=<hook> [registers=r3,r4] [after_instruction] [return]
+ *      [return_on_true] [return_on_false] [jump=<label>] [jump_on_true=<label>]
+ *      [jump_on_false=<label>]
+ * (one line each), the [[midasm_hook]] keys with labels for addresses. Returns false on a
+ * malformed line or an unknown label.
+ */
+bool LoadFixtureHooks(const std::string& asmPath, const std::map<size_t, std::string>& symbols,
+                      rex::codegen::RecompilerConfig& config) {
+  std::unordered_map<std::string, uint32_t> addressOf;
+  for (const auto& [addr, name] : symbols)
+    addressOf.emplace(name, static_cast<uint32_t>(addr));
+  std::ifstream in(asmPath);
+  std::string line;
+  bool ok = true;
+  while (std::getline(in, line)) {
+    line = rex::string::trim_string(line);
+    if (!line.starts_with("#@ midasm_hook"))
+      continue;
+    std::istringstream words(line.substr(14));
+    rex::codegen::MidAsmHook hook;
+    uint32_t at = 0;
+    auto label = [&](const std::string& name) -> uint32_t {
+      auto it = addressOf.find(name);
+      if (it == addressOf.end()) {
+        REXLOG_ERROR("{}: midasm_hook names unknown label '{}'", asmPath, name);
+        ok = false;
+        return 0;
+      }
+      return it->second;
+    };
+    for (std::string word; words >> word;) {
+      auto eq = word.find('=');
+      std::string key = word.substr(0, eq);
+      std::string value = eq == std::string::npos ? "" : word.substr(eq + 1);
+      if (key == "at") {
+        at = label(value);
+      } else if (key == "name") {
+        hook.name = value;
+      } else if (key == "registers") {
+        std::istringstream regs(value);
+        for (std::string r; std::getline(regs, r, ',');)
+          hook.registers.push_back(r);
+      } else if (key == "after_instruction") {
+        hook.afterInstruction = true;
+      } else if (key == "return") {
+        hook.ret = true;
+      } else if (key == "return_on_true") {
+        hook.returnOnTrue = true;
+      } else if (key == "return_on_false") {
+        hook.returnOnFalse = true;
+      } else if (key == "jump") {
+        hook.jumpAddress = label(value);
+      } else if (key == "jump_on_true") {
+        hook.jumpAddressOnTrue = label(value);
+      } else if (key == "jump_on_false") {
+        hook.jumpAddressOnFalse = label(value);
+      } else {
+        REXLOG_ERROR("{}: unknown midasm_hook key '{}'", asmPath, key);
+        ok = false;
+      }
+    }
+    if (at == 0 || hook.name.empty()) {
+      REXLOG_ERROR("{}: midasm_hook needs at= and name=: {}", asmPath, line);
+      ok = false;
+      continue;
+    }
+    config.midAsmHooks.insert_or_assign(at, std::move(hook));
+  }
+  return ok;
+}
+
 nlohmann::json SerializeRegisters(const std::vector<RegValue>& regs) {
   nlohmann::json arr = nlohmann::json::array();
   for (const auto& rv : regs) {
@@ -513,6 +586,7 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
   std::map<std::string, std::unordered_set<size_t>> functionsByFile;
   std::map<std::string, FileInfo> files;
   wasm::ImportRegistry imports;
+  wasm::HookRegistry hooks;
   nlohmann::json chunks = nlohmann::json::array();
   uint32_t nextSlot = 0;
 
@@ -542,6 +616,8 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
       else if (name == "test_longjmp")
         config.longJmpAddress = static_cast<uint32_t>(addr);
     }
+    if (!LoadFixtureHooks(fmt::format("{}/{}.s", asmDir, stem), symbols, config))
+      return false;
     auto ctx =
         codegen::CodegenContext::Create(codegen::BinaryView::fromModule(module), std::move(config));
     codegen::AnalyzeTestBinary(ctx, stem, symbols, kTestBaseAddress, fileData.data(),
@@ -561,7 +637,8 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
     wasm::TranslateOptions options;
     options.exportFunctions = true;
     options.singleFile = stem + ".wasm";
-    auto translation = wasm::TranslateFunctions(emitCtx, functions, nextSlot, imports, options);
+    auto translation =
+        wasm::TranslateFunctions(emitCtx, functions, nextSlot, imports, options, &hooks);
     nextSlot = translation.endSlot;
 
     FileInfo info;
@@ -582,6 +659,8 @@ bool RecompileTestsWasm(std::string_view binDir, std::string_view asmDir, std::s
   nlohmann::json manifest = wasm::ManifestBase(nextSlot);
   manifest["chunks"] = chunks;
   manifest["imports"] = imports.toJson();
+  if (!hooks.entries().empty())
+    manifest["hooks"] = hooks.toJson();
   {
     std::ofstream out(fmt::format("{}/manifest.json", outDir));
     out << manifest.dump(2) << '\n';

@@ -61,7 +61,7 @@ std::string FunctionName(const FunctionNode& fn, const EmitContext& ctx);
 Translation TranslateFunctions(const EmitContext& ctx,
                                const std::vector<const FunctionNode*>& functions,
                                uint32_t firstSlot, ImportRegistry& imports,
-                               const TranslateOptions& options);
+                               const TranslateOptions& options, HookRegistry* hooks = nullptr);
 
 /// manifest.json fields shared by every translation (without chunks and imports).
 nlohmann::json ManifestBase(uint32_t slots);

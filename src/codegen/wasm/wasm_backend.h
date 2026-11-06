@@ -109,6 +109,30 @@ class ImportRegistry {
   std::vector<Entry> entries_;
 };
 
+/// Mid-asm hooks (MCLA-Reborn patches, TRANS-003) emitted by the translation; ids index the
+/// manifest's `hooks` list and are what env.hook receives. Assigned in emission order (address
+/// order within a translation), so native and Emscripten builds agree.
+class HookRegistry {
+ public:
+  struct Entry {
+    uint32_t id;
+    uint32_t address;
+    std::string name;
+    std::vector<std::string> registers;
+    bool afterInstruction = false;
+    bool returnsBool = false;
+  };
+  uint32_t idFor(uint32_t address, const std::string& name,
+                 const std::vector<std::string>& registers, bool afterInstruction,
+                 bool returnsBool);
+  const std::vector<Entry>& entries() const { return entries_; }
+  nlohmann::json toJson() const;
+
+ private:
+  std::unordered_map<uint32_t, uint32_t> byAddress_;
+  std::vector<Entry> entries_;
+};
+
 /// Per-chunk information the function emitter needs.
 struct ModuleEnv {
   const ContextLayout& layout = ContextLayout::Get();
@@ -120,6 +144,7 @@ struct ModuleEnv {
   uint32_t fnGlobalLock = kNone;  ///< env.global_lock(ctx, op) -> i32 (mfmsr/mtmsrd)
   uint32_t longjmpTag = kNone;    ///< env.longjmp tag (i32 buf, i32 value)
   uint32_t catchType = 0;         ///< type index of [] -> [i32 i32] (the catch block)
+  uint32_t fnHook = kNone;        ///< env.hook(ctx, hook_id) -> i32 (mid-asm hooks, T-019)
   /// Module-internal helpers (not in the table, not exported).
   uint32_t fnLoad16 = 0, fnLoad32 = 0, fnLoad64 = 0, fnStore16 = 0, fnStore32 = 0, fnStore64 = 0,
            fnLog2f = 0;
@@ -128,12 +153,14 @@ struct ModuleEnv {
   /// Guest address -> table slot, for every translated function of the binary.
   const std::unordered_map<uint32_t, uint32_t>* slots = nullptr;
   ImportRegistry* imports = nullptr;
+  HookRegistry* hooks = nullptr;
 };
 
 /// Optional imports a function needs (pre-scan, so that imports precede the functions).
 struct ChunkFeatures {
   bool globalLock = false;  ///< mfmsr / mtmsr / mtmsrd (unless skip_msr)
   bool longjmp = false;     ///< calls to setjmp_address / longjmp_address
+  bool hook = false;        ///< a configured mid-asm hook inside the function
 };
 ChunkFeatures ScanFeatures(const EmitContext& ctx, const FunctionNode& fn);
 

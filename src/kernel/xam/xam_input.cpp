@@ -7,6 +7,8 @@
  ******************************************************************************
  *
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ * @modified    MCLA-Reborn contributors, 2026 - results reach guest memory field by field, so
+ *              they land right in swapped guest storage
  */
 
 #include <rex/input/input.h>
@@ -33,6 +35,52 @@ using rex::input::X_INPUT_VIBRATION;
 
 constexpr uint32_t XINPUT_FLAG_GAMEPAD = 0x01;
 constexpr uint32_t XINPUT_FLAG_ANY_USER = 1 << 30;
+
+// MCLA-Reborn: drivers fill host structs; these copy them to guest memory field by field. A
+// struct copy would move be<> fields' raw bytes and plain bytes to the wrong places in swapped
+// guest storage (rex::guest_storage); be<> assignment and StoreByte put them where guest code
+// reads them, and are plain stores in every other build.
+void StoreByte(uint8_t* p, uint8_t v) {
+  if (rex::guest_storage::contains(p)) {
+    rex::guest_storage::store<uint8_t>(p, v);
+  } else {
+    *p = v;
+  }
+}
+uint8_t LoadByte(const uint8_t* p) {
+  return rex::guest_storage::contains(p) ? rex::guest_storage::load<uint8_t>(p) : *p;
+}
+void StoreGamepad(rex::input::X_INPUT_GAMEPAD* dst, const rex::input::X_INPUT_GAMEPAD& src) {
+  dst->buttons = uint16_t(src.buttons);
+  StoreByte(&dst->left_trigger, src.left_trigger);
+  StoreByte(&dst->right_trigger, src.right_trigger);
+  dst->thumb_lx = int16_t(src.thumb_lx);
+  dst->thumb_ly = int16_t(src.thumb_ly);
+  dst->thumb_rx = int16_t(src.thumb_rx);
+  dst->thumb_ry = int16_t(src.thumb_ry);
+}
+void StoreState(X_INPUT_STATE* dst, const X_INPUT_STATE& src) {
+  dst->packet_number = uint32_t(src.packet_number);
+  StoreGamepad(&dst->gamepad, src.gamepad);
+}
+void StoreCapabilities(X_INPUT_CAPABILITIES* dst, const X_INPUT_CAPABILITIES& src) {
+  StoreByte(&dst->type, src.type);
+  StoreByte(&dst->sub_type, src.sub_type);
+  dst->flags = uint16_t(src.flags);
+  StoreGamepad(&dst->gamepad, src.gamepad);
+  dst->vibration.left_motor_speed = uint16_t(src.vibration.left_motor_speed);
+  dst->vibration.right_motor_speed = uint16_t(src.vibration.right_motor_speed);
+}
+void StoreKeystroke(X_INPUT_KEYSTROKE* dst, const X_INPUT_KEYSTROKE& src) {
+  dst->virtual_key = uint16_t(src.virtual_key);
+  dst->unicode = uint16_t(src.unicode);
+  dst->flags = uint16_t(src.flags);
+  StoreByte(&dst->user_index, src.user_index);
+  StoreByte(&dst->hid_code, src.hid_code);
+}
+
+X_RESULT GetCapabilitiesToGuest(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* caps);
+X_RESULT GetKeystrokeToGuest(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* keystroke);
 
 rex::input::InputSystem* input_system() {
   return static_cast<rex::input::InputSystem*>(REX_KERNEL_STATE()->emulator()->input_system());
@@ -65,8 +113,7 @@ u32 XamInputGetCapabilities_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_C
     actual_user_index = 0;
   }
 
-  auto* is = input_system();
-  return is->GetCapabilities(actual_user_index, flags, caps);
+  return GetCapabilitiesToGuest(actual_user_index, flags, caps);
 }
 
 u32 XamInputGetCapabilitiesEx_entry(u32 unk, u32 user_index, u32 flags,
@@ -87,8 +134,7 @@ u32 XamInputGetCapabilitiesEx_entry(u32 unk, u32 user_index, u32 flags,
   }
 
   (void)unk;  // Unused in this implementation
-  auto* is = input_system();
-  return is->GetCapabilities(actual_user_index, flags, caps);
+  return GetCapabilitiesToGuest(actual_user_index, flags, caps);
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetstate(v=vs.85).aspx
@@ -112,7 +158,12 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
   }
 
   auto* is = input_system();
-  return is->GetState(actual_user_index, input_state);
+  X_INPUT_STATE state = {};
+  X_RESULT result = is->GetState(actual_user_index, input_state ? &state : nullptr);
+  if (result == X_ERROR_SUCCESS && input_state) {
+    StoreState(input_state, state);
+  }
+  return result;
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
@@ -153,8 +204,7 @@ u32 XamInputGetKeystroke_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_KEYS
     actual_user_index = 0;
   }
 
-  auto* is = input_system();
-  return is->GetKeystroke(actual_user_index, flags, keystroke);
+  return GetKeystrokeToGuest(actual_user_index, flags, keystroke);
 }
 
 // Same as non-ex, just takes a pointer to user index.
@@ -175,10 +225,27 @@ u32 XamInputGetKeystrokeEx_entry(mapped_u32 user_index_ptr, u32 flags,
     user_index = 0;
   }
 
-  auto* is = input_system();
-  auto result = is->GetKeystroke(user_index, flags, keystroke);
+  auto result = GetKeystrokeToGuest(user_index, flags, keystroke);
   if (XSUCCEEDED(result)) {
-    *user_index_ptr = keystroke->user_index;
+    *user_index_ptr = LoadByte(&keystroke->user_index);
+  }
+  return result;
+}
+
+X_RESULT GetCapabilitiesToGuest(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* caps) {
+  X_INPUT_CAPABILITIES local = {};
+  X_RESULT result = input_system()->GetCapabilities(user_index, flags, &local);
+  if (result == X_ERROR_SUCCESS) {
+    StoreCapabilities(caps, local);
+  }
+  return result;
+}
+
+X_RESULT GetKeystrokeToGuest(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* keystroke) {
+  X_INPUT_KEYSTROKE local = {};
+  X_RESULT result = input_system()->GetKeystroke(user_index, flags, &local);
+  if (result == X_ERROR_SUCCESS) {
+    StoreKeystroke(keystroke, local);
   }
   return result;
 }

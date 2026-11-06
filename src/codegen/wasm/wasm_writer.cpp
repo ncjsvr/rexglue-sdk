@@ -50,11 +50,13 @@ namespace {
 
 ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionNode*>& functions,
                        const std::unordered_map<uint32_t, uint32_t>& slots, uint32_t firstSlot,
-                       ImportRegistry& imports, const TranslateOptions& options) {
+                       ImportRegistry& imports, const TranslateOptions& options,
+                       HookRegistry* hooks) {
   ModuleBuilder mb;
   ModuleEnv env;
   env.slots = &slots;
   env.imports = &imports;
+  env.hooks = hooks;
 
   using V = ValType;
   env.guestFnType = mb.addType({{V::I64}, {}});
@@ -80,6 +82,7 @@ ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionN
     const ChunkFeatures f = ScanFeatures(ctx, *fn);
     features.globalLock |= f.globalLock;
     features.longjmp |= f.longjmp;
+    features.hook |= f.hook;
   }
   if (features.globalLock)
     env.fnGlobalLock =
@@ -89,6 +92,8 @@ ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionN
     env.catchType = mb.addType({{}, {V::I32, V::I32}});
     env.longjmpTag = mb.importTag("env", "longjmp", tTag);
   }
+  if (features.hook)
+    env.fnHook = mb.importFunction("env", "hook", tMmioLoad);  // (i64 ctx, i32 id) -> i32
 
   const uint32_t firstIndex = mb.importedFunctionCount();
   for (size_t i = 0; i < functions.size(); ++i)
@@ -129,7 +134,7 @@ ChunkModule BuildChunk(const EmitContext& ctx, const std::vector<const FunctionN
 Translation TranslateFunctions(const EmitContext& ctx,
                                const std::vector<const FunctionNode*>& functions,
                                uint32_t firstSlot, ImportRegistry& imports,
-                               const TranslateOptions& options) {
+                               const TranslateOptions& options, HookRegistry* hooks) {
   std::unordered_map<uint32_t, uint32_t> slots;
   uint32_t slot = firstSlot;
   for (const auto* fn : functions)
@@ -150,7 +155,7 @@ Translation TranslateFunctions(const EmitContext& ctx,
   Translation result;
   result.endSlot = slot;
   for (size_t i = 0; i < groups.size(); ++i) {
-    ChunkModule chunk = BuildChunk(ctx, groups[i], slots, firstSlot, imports, options);
+    ChunkModule chunk = BuildChunk(ctx, groups[i], slots, firstSlot, imports, options, hooks);
     chunk.file = (groups.size() == 1 && !options.singleFile.empty())
                      ? options.singleFile
                      : fmt::format("{}{:03}.wasm", options.filePrefix, i);
@@ -188,10 +193,26 @@ bool WasmWriter::write(bool force) {
                       static_cast<uint32_t>(ctx_.analysisState().entryPoint), nullptr};
   emitCtx.resolver = runtime_ ? runtime_->export_resolver() : ctx_.resolver();
 
+  // MCLA-Reborn patches (TRANS-003): hooks are addresses in one exact build of one title.
+  if (!config.midAsmHooks.empty()) {
+    if (config.patchTitleId.empty() || config.patchXexVersion.empty()) {
+      REXCODEGEN_ERROR("[[midasm_hook]] entries need [patches] title_id and xex_version");
+      return false;
+    }
+    if (!titleId_.empty() &&
+        (titleId_ != config.patchTitleId || xexVersion_ != config.patchXexVersion)) {
+      REXCODEGEN_ERROR("The config's patches are for title {} version {}, but the XEX is title {} "
+                       "version {}: refusing to apply them",
+                       config.patchTitleId, config.patchXexVersion, titleId_, xexVersion_);
+      return false;
+    }
+  }
+
   ImportRegistry imports;
+  HookRegistry hooks;
   TranslateOptions options;
   options.chunkRange = config.wasmChunkRange;
-  auto translation = TranslateFunctions(emitCtx, functions, 0, imports, options);
+  auto translation = TranslateFunctions(emitCtx, functions, 0, imports, options, &hooks);
 
   nlohmann::json manifest = ManifestBase(translation.endSlot);
   manifest["title_id"] = titleId_;
@@ -206,6 +227,11 @@ bool WasmWriter::write(bool force) {
     produced.insert(chunk.file);
   }
   manifest["imports"] = imports.toJson();
+  if (!hooks.entries().empty()) {
+    manifest["patches"] = {{"title_id", config.patchTitleId},
+                           {"xex_version", config.patchXexVersion}};
+    manifest["hooks"] = hooks.toJson();
+  }
 
   auto record = [&](const std::string& name, std::string_view content) {
     switch (WriteIfChanged(outputPath / name, content)) {
@@ -241,6 +267,10 @@ bool WasmWriter::write(bool force) {
 
   REXLOG_INFO("wasm backend: {} functions in {} chunk(s), {} with unimplemented instructions",
               functions.size(), translation.chunks.size(), unimplementedFunctions);
+  if (!config.midAsmHooks.empty())
+    REXLOG_INFO("wasm backend: {} of {} mid-asm hooks emitted (patches for {} v{})",
+                hooks.entries().size(), config.midAsmHooks.size(), config.patchTitleId,
+                config.patchXexVersion);
   const auto& folds = GetAliasFoldStats();
   REXLOG_INFO("wasm backend: alias fold ({}): {} accesses checked at run time, {} constant "
               "addresses folded, {} provably below 0xC0000000",

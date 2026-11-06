@@ -316,6 +316,14 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
     }
   }
 
+  // [patches] -- the build that the hooks' guest addresses belong to (MCLA-Reborn, TRANS-003)
+  if (auto patches = toml["patches"].as_table()) {
+    if (auto v = (*patches)["title_id"].value<std::string>())
+      MergeScalar(cfg.patchTitleId, *v, "patches.title_id");
+    if (auto v = (*patches)["xex_version"].value<std::string>())
+      MergeScalar(cfg.patchXexVersion, *v, "patches.xex_version");
+  }
+
   // [[midasm_hook]] -- keyed by "address"
   if (auto midAsmHookArray = toml["midasm_hook"].as_array()) {
     for (auto& entry : *midAsmHookArray) {

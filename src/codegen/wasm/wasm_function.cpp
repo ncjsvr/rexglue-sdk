@@ -11,6 +11,11 @@
  * taken at the setjmp, sets r3 to the longjmp value and re-enters the loop at the case after
  * the setjmp call.
  *
+ * Mid-asm hooks ([[midasm_hook]], MCLA-Reborn patches, TRANS-003) call env.hook(ctx, id) before
+ * or after the hooked instruction, as ReXGlue's emit_mid_asm_hook calls the named C++ function:
+ * the host function sees the registers in the context; a bool hook's result picks the
+ * return/jump action of its true or false case.
+ *
  * @copyright   Copyright (c) 2026 MCLA-Reborn contributors
  * @license     Not yet licensed: MCLA-Reborn decides before any release (D-009)
  */
@@ -101,6 +106,30 @@ nlohmann::json ImportRegistry::toJson() const {
   return arr;
 }
 
+uint32_t HookRegistry::idFor(uint32_t address, const std::string& name,
+                             const std::vector<std::string>& registers, bool afterInstruction,
+                             bool returnsBool) {
+  if (auto it = byAddress_.find(address); it != byAddress_.end())
+    return it->second;
+  const uint32_t id = static_cast<uint32_t>(entries_.size());
+  entries_.push_back({id, address, name, registers, afterInstruction, returnsBool});
+  byAddress_.emplace(address, id);
+  return id;
+}
+
+nlohmann::json HookRegistry::toJson() const {
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& e : entries_) {
+    arr.push_back({{"id", e.id},
+                   {"address", e.address},
+                   {"name", e.name},
+                   {"registers", e.registers},
+                   {"after_instruction", e.afterInstruction},
+                   {"returns_bool", e.returnsBool}});
+  }
+  return arr;
+}
+
 namespace {
 
 constexpr uint32_t kBctr = 0x4E800420;
@@ -139,6 +168,50 @@ bool looksLikeSwitch(const uint32_t* data, uint32_t addr, uint32_t fnBase) {
   return false;
 }
 
+bool ReturnsBool(const MidAsmHook& h) {
+  return h.returnOnTrue || h.returnOnFalse || h.jumpAddressOnTrue != 0 ||
+         h.jumpAddressOnFalse != 0;
+}
+
+/// The return or jump that follows a hook call (or one case of a bool hook).
+void EmitHookAction(WasmBuilderContext& w, bool ret, uint32_t jump, const MidAsmHook& h) {
+  if (ret) {
+    w.ret();
+  } else if (jump != 0) {
+    if (w.hasSegment(jump)) {
+      w.branchTo(jump);
+    } else {
+      REXCODEGEN_ERROR("mid-asm hook {} at 0x{:08X}: jump target 0x{:08X} is not in function "
+                       "0x{:08X}",
+                       h.name, w.base, jump, w.fn.base());
+      w.trap(kUnresolvedCall, w.base);
+    }
+  }
+}
+
+/// env.hook(ctx, id), then the configured return/jump (BuilderContext::emit_mid_asm_hook).
+void EmitMidAsmHook(WasmBuilderContext& w, const MidAsmHook& h) {
+  const bool returnsBool = ReturnsBool(h);
+  const uint32_t id = w.env.hooks ? w.env.hooks->idFor(w.base, h.name, h.registers,
+                                                       h.afterInstruction, returnsBool)
+                                  : 0;
+  w.get(kLocalCtx);
+  w.i32(static_cast<int32_t>(id));
+  w.c.call(w.env.fnHook);
+  // The host may have changed any register.
+  detail::ResetRegisterKnowledge(w.st);
+  if (returnsBool) {
+    w.beginIf();
+    EmitHookAction(w, h.returnOnTrue, h.jumpAddressOnTrue, h);
+    w.beginElse();
+    EmitHookAction(w, h.returnOnFalse, h.jumpAddressOnFalse, h);
+    w.end();
+  } else {
+    w.op(Op::Drop);
+    EmitHookAction(w, h.ret, h.jumpAddress, h);
+  }
+}
+
 }  // namespace
 }  // namespace wasm
 
@@ -154,6 +227,8 @@ ChunkFeatures ScanFeatures(const EmitContext& ctx, const FunctionNode& fn) {
     for (uint32_t addr = block.base; addr < block.end(); addr += 4, ++data) {
       const uint32_t word = load_and_swap<uint32_t>(data);
       const uint32_t opcd = word >> 26;
+      if (cfg.midAsmHooks.count(addr))
+        f.hook = true;
       if (opcd == 31 && !cfg.skipMsr) {
         const uint32_t xo = (word >> 1) & 0x3FF;
         if (xo == 83 || xo == 146 || xo == 178)  // mfmsr, mtmsr, mtmsrd
@@ -207,6 +282,14 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
             env.longjmpTag != ModuleEnv::kNone) {
           st.setjmpSites.emplace(addr, addr + 4);
           labels.insert(addr + 4);
+        }
+      }
+      // Mid-asm hook jump targets start cases (function_graph.cpp makes them C++ labels).
+      if (auto h = ctx.config.midAsmHooks.find(addr); h != ctx.config.midAsmHooks.end()) {
+        for (uint32_t t : {h->second.jumpAddress, h->second.jumpAddressOnTrue,
+                           h->second.jumpAddressOnFalse}) {
+          if (t != 0)
+            labels.insert(t);
         }
       }
       if (auto st_it = ctx.config.switchTables.find(addr); st_it != ctx.config.switchTables.end()) {
@@ -302,11 +385,15 @@ bool FunctionNode::emitWasm(const EmitContext& ctx, const wasm::ModuleEnv& env,
 
       const uint32_t word = load_and_swap<uint32_t>(data);
       WasmBuilderContext w{c, ctx, env, *this, insn, addr, word, data, st, activeJt};
-      if (ctx.config.midAsmHooks.count(addr))
-        w.unimplemented("mid-asm hook");
+      const auto hook = ctx.config.midAsmHooks.find(addr);
+      const bool hasHook = hook != ctx.config.midAsmHooks.end() && env.fnHook != ModuleEnv::kNone;
+      if (hasHook && !hook->second.afterInstruction)
+        EmitMidAsmHook(w, hook->second);
       if (!DispatchWasmInstruction(w))
         w.unimplemented(insn.opcode->name);
       detail::TrackRegisterWrites(st, word);
+      if (hasHook && hook->second.afterInstruction)
+        EmitMidAsmHook(w, hook->second);
     }
   }
 

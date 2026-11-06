@@ -11,6 +11,8 @@
 
 #include <rex/system/xenumerator.h>
 
+#include <rex/memory/utils.h>
+
 namespace rex::system {
 
 XEnumerator::XEnumerator(KernelState* kernel_state, size_t items_per_enumerate, size_t item_size)
@@ -61,7 +63,9 @@ uint32_t XStaticUntypedEnumerator::WriteItems(uint32_t buffer_ptr, uint8_t* buff
 
   size_t size = count * item_size();
   size_t offset = current_item_ * item_size();
-  std::memcpy(buffer_data, buffer_.data() + offset, size);
+  // Items are host structs (big-endian bytes); copy_to_guest converts them for swapped guest
+  // storage (MCLA-Reborn harness) and is a memcpy everywhere else.
+  rex::memory::copy_to_guest(buffer_data, buffer_.data() + offset, size);
 
   current_item_ += count;
 

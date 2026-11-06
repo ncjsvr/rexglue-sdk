@@ -7,6 +7,8 @@
  ******************************************************************************
  *
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ * @modified    MCLA-Reborn contributors, 2026 - content data read from guest memory through
+ *              copy_from_guest (swapped guest storage)
  */
 
 #include <rex/cvar.h>
@@ -28,6 +30,17 @@ namespace kernel {
 namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
+
+namespace {
+// A guest struct as a host copy (big-endian bytes, as be<> and the raw name arrays expect).
+// A plain struct copy would carry swapped guest storage's byte order (MCLA-Reborn harness).
+template <typename T>
+T ReadGuestStruct(const void* guest) {
+  T value;
+  rex::memory::copy_from_guest(&value, guest, sizeof(T));
+  return value;
+}
+}  // namespace
 
 u32 XamContentGetLicenseMask_entry(mapped_u32 mask_ptr, mapped_void overlapped_ptr) {
   // Each bit in the mask represents a granted license. Available licenses
@@ -123,9 +136,9 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
 
   XCONTENT_AGGREGATE_DATA content_data;
   if (content_data_size == sizeof(XCONTENT_DATA)) {
-    content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+    content_data = ReadGuestStruct<XCONTENT_DATA>(content_data_ptr.host_address());
   } else if (content_data_size == sizeof(XCONTENT_AGGREGATE_DATA)) {
-    content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+    content_data = ReadGuestStruct<XCONTENT_AGGREGATE_DATA>(content_data_ptr.host_address());
   } else {
     assert_always();
     return X_ERROR_INVALID_PARAMETER;
@@ -296,7 +309,7 @@ u32 XamContentGetCreator_entry(u32 user_index, mapped_void content_data_ptr,
   auto result = X_ERROR_SUCCESS;
 
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  XCONTENT_AGGREGATE_DATA content_data = ReadGuestStruct<XCONTENT_DATA>(content_data_ptr.host_address());
 
   bool content_exists = REX_KERNEL_STATE()->content_manager()->ContentExists(xuid, content_data);
 
@@ -331,7 +344,7 @@ u32 XamContentGetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
   assert_not_null(buffer_size_ptr);
   uint32_t buffer_size = *buffer_size_ptr;
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  XCONTENT_AGGREGATE_DATA content_data = ReadGuestStruct<XCONTENT_DATA>(content_data_ptr.host_address());
 
   // Get thumbnail (if it exists).
   std::vector<uint8_t> buffer;
@@ -366,7 +379,7 @@ u32 XamContentSetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
                                  mapped_void buffer_ptr, u32 buffer_size,
                                  mapped_void overlapped_ptr) {
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  XCONTENT_AGGREGATE_DATA content_data = ReadGuestStruct<XCONTENT_DATA>(content_data_ptr.host_address());
 
   // Buffer is PNG data.
   auto buffer = std::vector<uint8_t>((uint8_t*)buffer_ptr, (uint8_t*)buffer_ptr + buffer_size);
@@ -384,7 +397,7 @@ u32 XamContentSetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
 u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
                            mapped_void overlapped_ptr) {
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  XCONTENT_AGGREGATE_DATA content_data = ReadGuestStruct<XCONTENT_DATA>(content_data_ptr.host_address());
 
   auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
 
@@ -400,7 +413,7 @@ u32 XamContentDeleteInternal_entry(mapped_void content_data_ptr, mapped_void ove
   // INFO: Analysis of xam.xex shows that "internal" functions are wrappers with
   // 0xFE as user_index
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+  XCONTENT_AGGREGATE_DATA content_data = ReadGuestStruct<XCONTENT_AGGREGATE_DATA>(content_data_ptr.host_address());
 
   auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
 

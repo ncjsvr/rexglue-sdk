@@ -105,6 +105,11 @@ struct RecompilerConfig {
   /// the canonical 0xA0000000 range (MCLA-Reborn D-080, T-050): "branch" (default), "select"
   /// (branchless) or "none" (no folding; for measurements only, wrong for real titles).
   std::string wasmAliasFold = "branch";
+  /// MCLA-Reborn patches (TRANS-003): mid-asm hooks are guest addresses of one exact build, so
+  /// a config with hooks names that build in [patches] (title_id: 8 hex digits, xex_version:
+  /// "a.b.c.d"); the wasm writer refuses any other XEX.
+  std::string patchTitleId;
+  std::string patchXexVersion;
 
   // === Analysis tuning (optional) ===
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets

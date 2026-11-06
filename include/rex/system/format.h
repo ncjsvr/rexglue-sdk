@@ -8,6 +8,8 @@
  *              See LICENSE file in the project root for full license text.
  *
  * @remarks     Based on Xenia's format_core
+ *
+ * @modified    MCLA-Reborn contributors, 2026 - guest strings read through swapped guest storage
  */
 
 #pragma once
@@ -62,6 +64,18 @@ enum ArgumentSize {
   AS_Long,
   AS_LongLong,
 };
+
+//=============================================================================
+// Guest character reads. In the MCLA-Reborn harness guest memory is swapped storage
+// (rex::guest_storage); everywhere else contains() is false and these are the raw reads.
+//=============================================================================
+inline uint16_t guest_char8(const uint8_t* p) {
+  return guest_storage::contains(p) ? guest_storage::load<uint8_t>(p) : *p;
+}
+/// The big-endian guest halfword at p, as a host value.
+inline uint16_t guest_char16(const uint16_t* p) {
+  return guest_storage::contains(p) ? guest_storage::load<uint16_t>(p) : rex::byte_swap(*p);
+}
 
 //=============================================================================
 // Concepts
@@ -207,14 +221,14 @@ class StringFormatData {
   explicit StringFormatData(const uint8_t* input) : input_(input) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = guest_char8(input_);
     if (result) {
       input_++;
     }
     return result;
   }
 
-  uint16_t peek(int32_t offset) { return input_[offset]; }
+  uint16_t peek(int32_t offset) { return guest_char8(input_ + offset); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -247,14 +261,14 @@ class WideStringFormatData {
   explicit WideStringFormatData(const uint16_t* input) : input_(input) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = guest_char16(input_);
     if (result) {
       input_++;
     }
-    return rex::byte_swap(result);
+    return result;
   }
 
-  uint16_t peek(int32_t offset) { return rex::byte_swap(input_[offset]); }
+  uint16_t peek(int32_t offset) { return guest_char16(input_ + offset); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -284,14 +298,14 @@ class WideCountFormatData {
   explicit WideCountFormatData(const uint16_t* input) : input_(input), count_(0) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = guest_char16(input_);
     if (result) {
       input_++;
     }
-    return rex::byte_swap(result);
+    return result;
   }
 
-  uint16_t peek(int32_t offset) { return rex::byte_swap(input_[offset]); }
+  uint16_t peek(int32_t offset) { return guest_char16(input_ + offset); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -722,12 +736,12 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
 
               if (!is_wide) {
                 length = 0;
-                for (auto s = (const uint8_t*)str; cap > 0 && *s; ++s, cap--) {
+                for (auto s = (const uint8_t*)str; cap > 0 && guest_char8(s); ++s, cap--) {
                   length++;
                 }
               } else {
                 length = 0;
-                for (auto s = (const uint16_t*)str; cap > 0 && *s; ++s, cap--) {
+                for (auto s = (const uint16_t*)str; cap > 0 && guest_char16(s); ++s, cap--) {
                   length++;
                 }
               }
@@ -800,7 +814,7 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
     if (!text.is_wide) {
       auto b = (const uint8_t*)text.buffer;
       while (remaining-- > 0) {
-        if (!data.put(*b++)) {
+        if (!data.put(guest_char8(b++))) {
           return -1;
         }
       }
@@ -808,7 +822,7 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
       auto b = (const uint16_t*)text.buffer;
       if (text.swap_wide) {
         while (remaining-- > 0) {
-          if (!data.put(rex::byte_swap(*b++))) {
+          if (!data.put(guest_char16(b++))) {
             return -1;
           }
         }
