@@ -12,6 +12,7 @@
  *
  *   rexglue-translate --config <manifest.toml> (--iso <image> | --xex <file>) [--out <dir>]
  *                     [--force] [--log-level <level>] [--progress]
+ *                     [--patch-file <path> --patch <name> ... --patch-xex-sha256 <hex>]
  *   rexglue-translate --tests <bin-dir> --asm <asm-dir> --out <dir>
  *
  * The second form translates the assembled PowerPC fixture corpus exactly as
@@ -26,6 +27,7 @@
  * Validate), write and done. The browser worker (T-023) shows them as progress.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <cstdio>
@@ -37,6 +39,8 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <toml++/toml.hpp>
+#include <crypto/sha256.h>
 
 #include <rex/codegen/analyze.h>
 #include <rex/codegen/binary_view.h>
@@ -70,6 +74,7 @@ void Usage() {
   std::fprintf(stderr,
                "usage: rexglue-translate --config <manifest.toml> (--iso <image> | --xex <file>)\n"
                "                         [--out <dir>] [--force] [--log-level <level>] [--progress]\n"
+               "                         [--patch-file <path> --patch <name> ... --patch-xex-sha256 <hex>]\n"
                "       rexglue-translate --tests <bin-dir> --asm <asm-dir> --out <dir>\n");
 }
 
@@ -92,6 +97,89 @@ bool ReadFile(const fs::path& path, std::vector<uint8_t>& out) {
   out.resize(static_cast<size_t>(in.tellg()));
   in.seekg(0);
   return static_cast<bool>(in.read(reinterpret_cast<char*>(out.data()), out.size()));
+}
+
+bool ApplyCanaryPatches(const std::string& file, const std::vector<std::string>& selected,
+                        std::string_view title_id, const rex::runtime::XexModule& module,
+                        rex::memory::Memory& memory) {
+  auto document = toml::parse_file(file);
+  if (title_id.empty() || document["title_id"].value_or(std::string_view{}) != title_id) {
+    REXLOG_ERROR("Patch file does not match title {}", title_id);
+    return false;
+  }
+  const auto* patches = document["patch"].as_array();
+  if (!patches) {
+    REXLOG_ERROR("Patch file has no patch entries");
+    return false;
+  }
+
+  // Validate every requested byte before modifying the in-memory image.
+  std::map<uint32_t, uint8_t> bytes;
+  for (const auto& name : selected) {
+    const toml::table* match = nullptr;
+    for (const auto& node : *patches) {
+      const auto* entry = node.as_table();
+      if (!entry || (*entry)["name"].value_or(std::string_view{}) != name) continue;
+      if (match) {
+        REXLOG_ERROR("Ambiguous patch name: {}", name);
+        return false;
+      }
+      match = entry;
+    }
+    if (!match) {
+      REXLOG_ERROR("Patch not found: {}", name);
+      return false;
+    }
+    bool has_writes = false;
+    for (const auto& [key, node] : *match) {
+      const auto type = key.str();
+      if (type == "name" || type == "author" || type == "desc" || type == "is_enabled") continue;
+      const uint32_t width = type == "be8" ? 1 : type == "be16" ? 2 : type == "be32" ? 4 : 0;
+      const auto* writes = node.as_array();
+      if (!width || !writes) {
+        REXLOG_ERROR("Unsupported write type {} in patch {}", type, name);
+        return false;
+      }
+      for (const auto& write : *writes) {
+        const auto* entry = write.as_table();
+        if (!entry) {
+          REXLOG_ERROR("Invalid {} write in patch {}", type, name);
+          return false;
+        }
+        const auto address = (*entry)["address"].value<uint32_t>();
+        const auto value = (*entry)["value"].value<uint32_t>();
+        if (!address || !value || *address % width || uint64_t(*address) + width > (uint64_t(1) << 32) ||
+            uint64_t(*value) >= (uint64_t(1) << (width * 8))) {
+          REXLOG_ERROR("Invalid {} write in patch {}", type, name);
+          return false;
+        }
+        const auto& sections = module.binary_sections();
+        const bool inside_code = std::any_of(sections.begin(), sections.end(), [&](const auto& s) {
+          return s.executable && s.host_data && *address >= s.virtual_address &&
+                 uint64_t(*address) + width <= uint64_t(s.virtual_address) + s.virtual_size;
+        });
+        if (!inside_code) {
+          REXLOG_ERROR("Patch {} writes outside executable sections at {:08X}", name, *address);
+          return false;
+        }
+        for (uint32_t i = 0; i < width; ++i) {
+          if (!bytes.emplace(*address + i, uint8_t(*value >> ((width - 1 - i) * 8))).second) {
+            REXLOG_ERROR("Overlapping patch writes at {:08X}", *address + i);
+            return false;
+          }
+        }
+        has_writes = true;
+      }
+    }
+    if (!has_writes) {
+      REXLOG_ERROR("Patch {} contains no executable writes", name);
+      return false;
+    }
+  }
+  for (const auto& [address, byte] : bytes) *memory.TranslateVirtual(address) = byte;
+  REXLOG_INFO("Applied {} local patches ({} bytes) to the verified XEX", selected.size(),
+              bytes.size());
+  return true;
 }
 
 // --progress: one machine-readable line per step, flushed so a host sees it at once.
@@ -118,6 +206,8 @@ class StepPrinter : public rex::codegen::ProgressReporter {
 int Run(int argc, char** argv) {
   const auto tStart = Clock::now();
   std::string configArg, isoArg, xexArg, outArg, testsArg, asmArg, logLevel = "info";
+  std::string patchFile, patchXexSha256;
+  std::vector<std::string> patches;
   bool force = false, progress = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -136,6 +226,12 @@ int Run(int argc, char** argv) {
       ok = value(xexArg);
     else if (a == "--out")
       ok = value(outArg);
+    else if (a == "--patch-file")
+      ok = value(patchFile);
+    else if (a == "--patch-xex-sha256")
+      ok = value(patchXexSha256);
+    else if (a == "--patch")
+      ok = value(patches.emplace_back());
     else if (a == "--tests")
       ok = value(testsArg);
     else if (a == "--asm")
@@ -160,6 +256,12 @@ int Run(int argc, char** argv) {
   const bool testsMode = !testsArg.empty();
   if (testsMode ? (asmArg.empty() || outArg.empty())
                 : (configArg.empty() || (!isoArg.empty() && !xexArg.empty()))) {
+    Usage();
+    return 2;
+  }
+  const bool patchMode = !patches.empty();
+  if (patchMode != !patchFile.empty() || patchMode != !patchXexSha256.empty() ||
+      (patchMode && (testsMode || outArg.empty() || patchXexSha256.size() != 64))) {
     Usage();
     return 2;
   }
@@ -227,6 +329,10 @@ int Run(int argc, char** argv) {
     }
     source = xexPath.string();
   }
+  if (patchMode && sha256::SHA256{}(xexBytes.data(), xexBytes.size()) != patchXexSha256) {
+    REXLOG_ERROR("XEX SHA-256 does not match the required patch target");
+    return 1;
+  }
   const auto tRead = Clock::now();
   REXLOG_INFO("Read {} bytes from {}", xexBytes.size(), source);
 
@@ -258,6 +364,9 @@ int Run(int argc, char** argv) {
   }
   REXLOG_INFO("Title {} version {}, image {:#x} bytes at {:#010x}", titleId, xexVersion,
               xex.image_size(), xex.base_address());
+  if (patchMode && !ApplyCanaryPatches(patchFile, patches, titleId, xex, memory)) {
+    return 1;
+  }
   const auto tLoad = Clock::now();
 
   auto ctx = rex::codegen::CodegenContext::Create(rex::codegen::BinaryView::fromModule(xex),

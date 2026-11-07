@@ -94,6 +94,7 @@ set(_cg ${REXGLUE_ROOT}/src/codegen)
 add_library(rexglue_translate_objs OBJECT
     # CLI, ISO reader, kernel export tables (names only)
     ${REXGLUE_ROOT}/src/translator/main.cpp
+    ${REXGLUE_ROOT}/thirdparty/crypto/sha256.cpp
     ${REXGLUE_ROOT}/src/translator/xdvdfs.cpp
     ${REXGLUE_ROOT}/src/translator/kernel_exports.cpp
     ${REXGLUE_ROOT}/src/translator/tool_support.cpp
